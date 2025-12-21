@@ -924,8 +924,7 @@ class NeteaseProvider(MusicProvider):
             _LOGGER.warning(f"No 'album' key in response for ID: {prov_album_id}. Keys: {list(data.keys())}")
             return []
 
-        album_info = data["album"]
-        songs = album_info.get("songs", [])
+        songs = data.get("songs", [])
         _LOGGER.info(f"Found {len(songs)} songs in album response")
 
         if not songs:
