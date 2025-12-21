@@ -106,9 +106,8 @@ class NeteaseProvider(MusicProvider):
     _api_url: str
     _http_client: httpx.AsyncClient
 
-    async def setup(self) -> None:
+    async def handle_async_init(self) -> None:
         """Initialize provider."""
-        await super().setup()
         api_url = self.config.get_value(CONF_KEY_API_URL)
         if not api_url or not isinstance(api_url, str):
             msg = "API URL is required"
