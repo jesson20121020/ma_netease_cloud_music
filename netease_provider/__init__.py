@@ -269,13 +269,22 @@ class NeteaseProvider(MusicProvider):
         _LOGGER.info(f"Browse called with path: {path}")
 
         # Handle album browsing - show tracks in the album
+        # Try different path formats that Music Assistant might use
+        album_id = None
         if path.startswith("album/"):
             album_id = path.split("/", 1)[1]
+        elif path.startswith("albums/"):
+            # Handle paths like "albums/album_id/tracks"
+            path_parts = path.split("/")
+            if len(path_parts) >= 2 and path_parts[1].isdigit():
+                album_id = path_parts[1]
+
+        if album_id:
             _LOGGER.info(f"Browsing album with ID: {album_id}")
 
             # Get album details and its tracks
             album_data = await self._request("/album", params={"id": album_id})
-            _LOGGER.info(f"Album API response: {album_data}")
+            _LOGGER.info(f"Album API response keys: {list(album_data.keys()) if album_data else 'None'}")
 
             if album_data and "album" in album_data and "songs" in album_data["album"]:
                 album_info = album_data["album"]
@@ -300,6 +309,7 @@ class NeteaseProvider(MusicProvider):
                                 thumbnail=track.metadata.images[0].path if track.metadata.images else None,
                             )
                         )
+                        _LOGGER.info(f"Successfully created browse item for: {track.name}")
                     else:
                         _LOGGER.warning(f"Failed to create track for song: {song_data.get('name', 'Unknown')}")
 
@@ -312,7 +322,7 @@ class NeteaseProvider(MusicProvider):
                     items=items,
                 )
             else:
-                _LOGGER.warning(f"Album data not found or invalid for ID: {album_id}")
+                _LOGGER.warning(f"Album data not found or invalid for ID: {album_id}. Response: {album_data}")
 
         # Default: return empty browse folder
         _LOGGER.info("Returning default empty browse folder")
