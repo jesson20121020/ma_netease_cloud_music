@@ -65,6 +65,7 @@ SUPPORTED_FEATURES = {
     ProviderFeature.LIBRARY_TRACKS,
     ProviderFeature.LIBRARY_PODCASTS,
     ProviderFeature.LIBRARY_AUDIOBOOKS,
+    ProviderFeature.ARTIST_ALBUMS,
 }
 
 
@@ -277,10 +278,12 @@ class NeteaseProvider(MusicProvider):
 
             # Parse album
             album: Album | ItemMapping | None = None
+            album_cover_url: str | None = None
             if "album" in song_data:
                 album_data = song_data["album"]
                 album_id = str(album_data["id"])
                 album_name = album_data.get("name", "Unknown Album")
+                album_cover_url = album_data.get("picUrl")
                 album = Album(
                     item_id=album_id,
                     provider=self.instance_id,
@@ -294,6 +297,9 @@ class NeteaseProvider(MusicProvider):
                         )
                     },
                 )
+
+            # Build images from album cover
+            images = self._build_images([album_cover_url] if album_cover_url else None)
 
             return Track(
                 item_id=song_id,
@@ -309,6 +315,7 @@ class NeteaseProvider(MusicProvider):
                         provider_instance=self.instance_id,
                     )
                 },
+                metadata=MediaItemMetadata(images=images),
                 disc_number=song_data.get("disc", 1),
                 track_number=song_data.get("trackNo", 1),
             )
@@ -367,7 +374,13 @@ class NeteaseProvider(MusicProvider):
         try:
             artist_id = str(artist_data["id"])
             name = artist_data.get("name", "Unknown Artist")
-            images = self._build_images([artist_data.get("picUrl")] if artist_data.get("picUrl") else None)
+            # Try multiple possible fields for artist image
+            pic_url = (
+                artist_data.get("picUrl")
+                or artist_data.get("img1v1Url")
+                or artist_data.get("cover")
+            )
+            images = self._build_images([pic_url] if pic_url else None)
 
             return Artist(
                 item_id=artist_id,
@@ -464,6 +477,7 @@ class NeteaseProvider(MusicProvider):
 
     async def get_artist(self, prov_artist_id: str) -> Artist:
         """Get full artist details by id."""
+        # Get artist detail which includes basic info and description
         data = await self._request("/artist/detail", params={"id": prov_artist_id})
         if not data or "data" not in data:
             msg = f"Artist {prov_artist_id} not found"
@@ -472,7 +486,14 @@ class NeteaseProvider(MusicProvider):
         artist_data = data["data"]["artist"]
         artist_id = str(artist_data["id"])
         name = artist_data.get("name", "Unknown Artist")
-        images = self._build_images([artist_data.get("picUrl")] if artist_data.get("picUrl") else None)
+        
+        # Get artist picUrl - try multiple possible fields
+        pic_url = (
+            artist_data.get("picUrl")
+            or artist_data.get("img1v1Url")
+            or artist_data.get("cover")
+        )
+        images = self._build_images([pic_url] if pic_url else None)
 
         return Artist(
             item_id=artist_id,
@@ -732,6 +753,50 @@ class NeteaseProvider(MusicProvider):
 
         msg = f"Could not get stream URL for {item_id}"
         raise ValueError(msg)
+
+    async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
+        """Get a list of albums for the given artist."""
+        data = await self._request("/artist/album", params={"id": prov_artist_id, "limit": 50})
+        if not data or "hotAlbums" not in data:
+            return []
+
+        albums = []
+        for album_data in data["hotAlbums"]:
+            try:
+                album_id = str(album_data["id"])
+                album_name = album_data.get("name", "Unknown Album")
+                
+                # Parse artists
+                artists = UniqueList[Artist]()
+                if "artists" in album_data:
+                    for artist_info in album_data["artists"]:
+                        artist_id = str(artist_info["id"])
+                        artists.append(await self.get_artist(artist_id))
+                
+                images = self._build_images([album_data.get("picUrl")] if album_data.get("picUrl") else None)
+
+                albums.append(
+                    Album(
+                        item_id=album_id,
+                        provider=self.instance_id,
+                        name=album_name,
+                        artists=artists,
+                        provider_mappings={
+                            ProviderMapping(
+                                item_id=album_id,
+                                provider_domain=self.domain,
+                                provider_instance=self.instance_id,
+                            )
+                        },
+                        metadata=MediaItemMetadata(images=images),
+                        year=album_data.get("publishTime", 0) // 10000 if album_data.get("publishTime") else None,
+                    )
+                )
+            except Exception as err:
+                _LOGGER.error("Error parsing artist album: %s", err)
+                continue
+
+        return albums
 
     # Library methods - return empty for now as this is a streaming provider
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
