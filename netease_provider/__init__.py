@@ -262,6 +262,53 @@ class NeteaseProvider(MusicProvider):
 
         return result
 
+    async def browse(self, item_id: str | None = None, item_type: MediaType | None = None) -> BrowseFolder:
+        """Browse the provider's media library."""
+        from music_assistant_models.media_items import BrowseFolder, BrowseFolderItem
+
+        # Handle album browsing - show tracks in the album
+        if item_type == MediaType.ALBUM and item_id:
+            # Get album details and its tracks
+            album_data = await self._request("/album", params={"id": item_id})
+            if album_data and "album" in album_data and "songs" in album_data["album"]:
+                album_info = album_data["album"]
+                songs = album_info["songs"]
+
+                # Convert songs to BrowseFolderItems
+                items = []
+                for song_data in songs:
+                    # Get detailed track info for accurate data
+                    track_details = await self._batch_fetch_track_details([str(song_data["id"])])
+                    track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
+                    if track:
+                        items.append(
+                            BrowseFolderItem(
+                                item_id=track.item_id,
+                                name=track.name,
+                                media_type=MediaType.TRACK,
+                                provider=self.instance_id,
+                                playable=True,
+                                thumbnail=track.metadata.images[0].path if track.metadata.images else None,
+                            )
+                        )
+
+                return BrowseFolder(
+                    item_id=item_id,
+                    name=album_info.get("name", "Unknown Album"),
+                    provider=self.instance_id,
+                    path=f"album/{item_id}",
+                    items=items,
+                )
+
+        # Default: return empty browse folder
+        return BrowseFolder(
+            item_id="",
+            name="Netease Cloud Music",
+            provider=self.instance_id,
+            path="",
+            items=[],
+        )
+
     async def _batch_fetch_track_details(self, track_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Batch fetch track details for accurate cover images."""
         if not track_ids:
