@@ -298,8 +298,10 @@ class NeteaseProvider(MusicProvider):
                     },
                 )
 
-            # Build images from album cover
-            images = self._build_images([album_cover_url] if album_cover_url else None)
+            # Build images: try song's picUrl first, then album's
+            song_pic_url = song_data.get("picUrl")
+            cover_url = song_pic_url or album_cover_url
+            images = self._build_images([cover_url] if cover_url else None)
 
             return Track(
                 item_id=song_id,
@@ -454,7 +456,11 @@ class NeteaseProvider(MusicProvider):
             album_id = str(album_data["id"])
             album = await self.get_album(album_id)
 
-        images = self._build_images([song_data.get("al", {}).get("picUrl")] if song_data.get("al", {}).get("picUrl") else None)
+        # Build images: try song's picUrl first, then album's
+        song_pic_url = song_data.get("picUrl")
+        album_pic_url = song_data.get("al", {}).get("picUrl")
+        cover_url = song_pic_url or album_pic_url
+        images = self._build_images([cover_url] if cover_url else None)
 
         return Track(
             item_id=song_id,
@@ -530,7 +536,13 @@ class NeteaseProvider(MusicProvider):
                 artist_id = str(artist_data["id"])
                 artists.append(await self.get_artist(artist_id))
 
-        images = self._build_images([album_data.get("picUrl")] if album_data.get("picUrl") else None)
+        # Build images: try album's picUrl first, then from first song if available
+        album_pic_url = album_data.get("picUrl")
+        if not album_pic_url and "songs" in album_data and album_data["songs"]:
+            # Try to get picUrl from the first song
+            first_song = album_data["songs"][0]
+            album_pic_url = first_song.get("picUrl") or first_song.get("al", {}).get("picUrl")
+        images = self._build_images([album_pic_url] if album_pic_url else None)
 
         return Album(
             item_id=album_id,
