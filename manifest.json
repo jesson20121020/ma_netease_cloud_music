@@ -1,0 +1,9 @@
+{
+  "domain": "netease",
+  "name": "Netease Cloud Music",
+  "codeowners": ["@your-github-username"],
+  "documentation": "https://github.com/your-username/ma-netease-provider",
+  "requirements": ["httpx>=0.24.0"],
+  "version": "0.1.0"
+}
+
