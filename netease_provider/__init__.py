@@ -28,7 +28,6 @@ from music_assistant_models.media_items import (
     Podcast,
     PodcastEpisode,
     ProviderMapping,
-    SearchResult,
     Track,
     UniqueList,
 )
@@ -46,7 +45,20 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+
 CONF_KEY_API_URL = "api_url"
+
+
+class SearchResult:
+    """Search result container."""
+
+    def __init__(self) -> None:
+        """Initialize search result."""
+        self.tracks: list[Track] = []
+        self.albums: list[Album] = []
+        self.artists: list[Artist] = []
+        self.playlists: list[Any] = []  # Playlist type not available in MA
+        self.podcasts: list[Podcast] = []
 
 # NeteaseCloudMusicApi search types
 # 1: 单曲, 10: 专辑, 100: 歌手, 1000: 歌单, 1009: 电台, 1014: 视频
