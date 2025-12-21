@@ -150,12 +150,23 @@ class NeteaseProvider(MusicProvider):
         """Build MediaItemImage from URL."""
         if not url:
             return None
+        # Process Netease image URL to add size parameter for better quality
+        processed_url = self._process_netease_image_url(url)
         return MediaItemImage(
             type=image_type,
-            path=url,
+            path=processed_url,
             provider=self.instance_id,
             remotely_accessible=True,
         )
+
+    def _process_netease_image_url(self, url: str, size: int = 300) -> str:
+        """Process Netease image URL to add size parameter for better quality."""
+        if not url or 'music.126.net' not in url:
+            return url
+        # Add size parameter if not already present
+        if '?' in url:
+            return url
+        return f"{url}?param={size}y{size}"
 
     def _build_images(self, urls: list[str] | None) -> UniqueList[MediaItemImage]:
         """Build UniqueList of MediaItemImage from URLs."""
@@ -194,8 +205,11 @@ class NeteaseProvider(MusicProvider):
                     params={"keywords": search_query, "type": NETEASE_SEARCH_TYPE_SONG, "limit": limit},
                 )
                 if data and "result" in data and "songs" in data["result"]:
-                    for song_data in data["result"]["songs"][:limit]:
-                        track = await self._parse_track_from_search(song_data)
+                    songs_data = data["result"]["songs"][:limit]
+                    # Batch fetch track details for accurate cover images
+                    track_details = await self._batch_fetch_track_details([str(song["id"]) for song in songs_data])
+                    for song_data in songs_data:
+                        track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
                         if track:
                             result.tracks.append(track)
             except Exception as err:
@@ -248,7 +262,24 @@ class NeteaseProvider(MusicProvider):
 
         return result
 
-    async def _parse_track_from_search(self, song_data: dict[str, Any]) -> Track | None:
+    async def _batch_fetch_track_details(self, track_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Batch fetch track details for accurate cover images."""
+        if not track_ids:
+            return {}
+        
+        # Use batch API to get details for multiple tracks
+        ids_str = ','.join(track_ids)
+        data = await self._request("/song/detail", params={"ids": ids_str})
+        if not data or "songs" not in data:
+            return {}
+        
+        # Create mapping of track_id to detail data
+        details = {}
+        for song in data["songs"]:
+            details[str(song["id"])] = song
+        return details
+
+    async def _parse_track_from_search(self, song_data: dict[str, Any], detail_data: dict[str, Any] | None = None) -> Track | None:
         """Parse Track from search result."""
         try:
             song_id = str(song_data["id"])
@@ -298,9 +329,15 @@ class NeteaseProvider(MusicProvider):
                     },
                 )
 
-            # Build images: try song's picUrl first, then album's
-            song_pic_url = song_data.get("picUrl")
-            cover_url = song_pic_url or album_cover_url
+            # Build images: prefer detail data, then search data
+            cover_url = None
+            if detail_data:
+                # Use detailed data which has accurate picUrl
+                cover_url = detail_data.get("picUrl") or detail_data.get("al", {}).get("picUrl")
+            if not cover_url:
+                # Fallback to search data
+                song_pic_url = song_data.get("picUrl")
+                cover_url = song_pic_url or album_cover_url
             images = self._build_images([cover_url] if cover_url else None)
 
             return Track(
