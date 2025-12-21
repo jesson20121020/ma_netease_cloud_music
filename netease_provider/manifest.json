@@ -1,9 +1,12 @@
 {
-  "domain": "netease",
-  "name": "Netease Cloud Music",
-  "codeowners": ["@your-github-username"],
-  "documentation": "https://github.com/your-username/ma-netease-provider",
-  "requirements": ["httpx>=0.24.0"],
-  "version": "0.1.0"
+  "type": "music",
+  "domain": "netease_provider",
+  "stage": "alpha",
+  "name": "Netease Cloud provider",
+  "description": "Connect Netease Cloud Music to Music Assistant",
+  "codeowners": ["@jesson20121020"],
+  "requirements": [],
+  "documentation": "",
+  "multi_instance": true,
+  "builtin": false
 }
-
