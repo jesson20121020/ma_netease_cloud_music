@@ -262,28 +262,18 @@ class NeteaseProvider(MusicProvider):
 
         return result
 
-    async def browse(self, path: str) -> BrowseFolder:
+    async def browse(self, item_id: str | None = None, item_type: MediaType | None = None) -> BrowseFolder:
         """Browse the provider's media library."""
         from music_assistant_models.media_items import BrowseFolder, BrowseFolderItem
 
-        _LOGGER.info(f"Browse called with path: {path}")
+        _LOGGER.info(f"Browse called with item_id={item_id}, item_type={item_type}")
 
         # Handle album browsing - show tracks in the album
-        # Try different path formats that Music Assistant might use
-        album_id = None
-        if path.startswith("album/"):
-            album_id = path.split("/", 1)[1]
-        elif path.startswith("albums/"):
-            # Handle paths like "albums/album_id/tracks"
-            path_parts = path.split("/")
-            if len(path_parts) >= 2 and path_parts[1].isdigit():
-                album_id = path_parts[1]
-
-        if album_id:
-            _LOGGER.info(f"Browsing album with ID: {album_id}")
+        if item_type == MediaType.ALBUM and item_id:
+            _LOGGER.info(f"Browsing album with ID: {item_id}")
 
             # Get album details and its tracks
-            album_data = await self._request("/album", params={"id": album_id})
+            album_data = await self._request("/album", params={"id": item_id})
             _LOGGER.info(f"Album API response keys: {list(album_data.keys()) if album_data else 'None'}")
 
             if album_data and "album" in album_data and "songs" in album_data["album"]:
@@ -315,14 +305,14 @@ class NeteaseProvider(MusicProvider):
 
                 _LOGGER.info(f"Created {len(items)} browse items")
                 return BrowseFolder(
-                    item_id=album_id,
+                    item_id=item_id,
                     name=album_info.get("name", "Unknown Album"),
                     provider=self.instance_id,
-                    path=path,
+                    path=f"album/{item_id}",
                     items=items,
                 )
             else:
-                _LOGGER.warning(f"Album data not found or invalid for ID: {album_id}. Response: {album_data}")
+                _LOGGER.warning(f"Album data not found or invalid for ID: {item_id}. Response: {album_data}")
 
         # Default: return empty browse folder
         _LOGGER.info("Returning default empty browse folder")
@@ -921,21 +911,44 @@ class NeteaseProvider(MusicProvider):
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get all tracks for a given album."""
+        _LOGGER.info(f"get_album_tracks called for album ID: {prov_album_id}")
+
         data = await self._request("/album", params={"id": prov_album_id})
-        if not data or "album" not in data or "songs" not in data["album"]:
+        _LOGGER.info(f"Album API response: {data}")
+
+        if not data:
+            _LOGGER.warning(f"No data returned from album API for ID: {prov_album_id}")
             return []
 
-        songs = data["album"]["songs"]
+        if "album" not in data:
+            _LOGGER.warning(f"No 'album' key in response for ID: {prov_album_id}. Keys: {list(data.keys())}")
+            return []
+
+        album_info = data["album"]
+        songs = album_info.get("songs", [])
+        _LOGGER.info(f"Found {len(songs)} songs in album response")
+
+        if not songs:
+            _LOGGER.warning(f"No songs found in album {prov_album_id}")
+            return []
+
         tracks = []
 
         # Batch fetch track details for accurate cover images
-        track_details = await self._batch_fetch_track_details([str(song["id"]) for song in songs])
+        track_ids = [str(song["id"]) for song in songs]
+        _LOGGER.info(f"Batch fetching details for {len(track_ids)} tracks")
+        track_details = await self._batch_fetch_track_details(track_ids)
 
         for song_data in songs:
+            _LOGGER.info(f"Processing song: {song_data.get('name', 'Unknown')}")
             track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
             if track:
                 tracks.append(track)
+                _LOGGER.info(f"Successfully created track: {track.name}")
+            else:
+                _LOGGER.warning(f"Failed to create track for song: {song_data.get('name', 'Unknown')}")
 
+        _LOGGER.info(f"Returning {len(tracks)} tracks for album {prov_album_id}")
         return tracks
 
     # Library methods - return empty for now as this is a streaming provider
