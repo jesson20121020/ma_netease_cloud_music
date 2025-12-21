@@ -262,14 +262,15 @@ class NeteaseProvider(MusicProvider):
 
         return result
 
-    async def browse(self, item_id: str | None = None, item_type: MediaType | None = None) -> BrowseFolder:
+    async def browse(self, path: str) -> BrowseFolder:
         """Browse the provider's media library."""
         from music_assistant_models.media_items import BrowseFolder, BrowseFolderItem
 
         # Handle album browsing - show tracks in the album
-        if item_type == MediaType.ALBUM and item_id:
+        if path.startswith("album/"):
+            album_id = path.split("/", 1)[1]
             # Get album details and its tracks
-            album_data = await self._request("/album", params={"id": item_id})
+            album_data = await self._request("/album", params={"id": album_id})
             if album_data and "album" in album_data and "songs" in album_data["album"]:
                 album_info = album_data["album"]
                 songs = album_info["songs"]
@@ -293,10 +294,10 @@ class NeteaseProvider(MusicProvider):
                         )
 
                 return BrowseFolder(
-                    item_id=item_id,
+                    item_id=album_id,
                     name=album_info.get("name", "Unknown Album"),
                     provider=self.instance_id,
-                    path=f"album/{item_id}",
+                    path=path,
                     items=items,
                 )
 
@@ -893,6 +894,25 @@ class NeteaseProvider(MusicProvider):
                 continue
 
         return albums
+
+    async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
+        """Get all tracks for a given album."""
+        data = await self._request("/album", params={"id": prov_album_id})
+        if not data or "album" not in data or "songs" not in data["album"]:
+            return []
+
+        songs = data["album"]["songs"]
+        tracks = []
+
+        # Batch fetch track details for accurate cover images
+        track_details = await self._batch_fetch_track_details([str(song["id"]) for song in songs])
+
+        for song_data in songs:
+            track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
+            if track:
+                tracks.append(track)
+
+        return tracks
 
     # Library methods - return empty for now as this is a streaming provider
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
