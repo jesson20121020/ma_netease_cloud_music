@@ -266,18 +266,26 @@ class NeteaseProvider(MusicProvider):
         """Browse the provider's media library."""
         from music_assistant_models.media_items import BrowseFolder, BrowseFolderItem
 
+        _LOGGER.info(f"Browse called with path: {path}")
+
         # Handle album browsing - show tracks in the album
         if path.startswith("album/"):
             album_id = path.split("/", 1)[1]
+            _LOGGER.info(f"Browsing album with ID: {album_id}")
+
             # Get album details and its tracks
             album_data = await self._request("/album", params={"id": album_id})
+            _LOGGER.info(f"Album API response: {album_data}")
+
             if album_data and "album" in album_data and "songs" in album_data["album"]:
                 album_info = album_data["album"]
                 songs = album_info["songs"]
+                _LOGGER.info(f"Found {len(songs)} songs in album")
 
                 # Convert songs to BrowseFolderItems
                 items = []
                 for song_data in songs:
+                    _LOGGER.info(f"Processing song: {song_data.get('name', 'Unknown')}")
                     # Get detailed track info for accurate data
                     track_details = await self._batch_fetch_track_details([str(song_data["id"])])
                     track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
@@ -292,7 +300,10 @@ class NeteaseProvider(MusicProvider):
                                 thumbnail=track.metadata.images[0].path if track.metadata.images else None,
                             )
                         )
+                    else:
+                        _LOGGER.warning(f"Failed to create track for song: {song_data.get('name', 'Unknown')}")
 
+                _LOGGER.info(f"Created {len(items)} browse items")
                 return BrowseFolder(
                     item_id=album_id,
                     name=album_info.get("name", "Unknown Album"),
@@ -300,8 +311,11 @@ class NeteaseProvider(MusicProvider):
                     path=path,
                     items=items,
                 )
+            else:
+                _LOGGER.warning(f"Album data not found or invalid for ID: {album_id}")
 
         # Default: return empty browse folder
+        _LOGGER.info("Returning default empty browse folder")
         return BrowseFolder(
             item_id="",
             name="Netease Cloud Music",
