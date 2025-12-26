@@ -1,0 +1,3 @@
+[submodule "umc_server/server"]
+	path = umc_server/server
+	url = https://github.com/UnblockNeteaseMusic/server.git
