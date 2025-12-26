@@ -48,6 +48,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 CONF_KEY_API_URL = "api_url"
+CONF_KEY_UNBLOCK_API_URL = "unblock_api_url"
 
 # NeteaseCloudMusicApi search types
 # 1: 单曲, 10: 专辑, 100: 歌手, 1000: 歌单, 1009: 电台, 1014: 视频
@@ -98,6 +99,14 @@ async def get_config_entries(
             default_value="http://localhost:3000",
             required=True,
         ),
+        ConfigEntry(
+            key=CONF_KEY_UNBLOCK_API_URL,
+            type=ConfigEntryType.STRING,
+            label="解锁 API 地址",
+            description="网易云音乐解锁 API 服务地址（例如：http://localhost:3001），用于获取无版权限制的音源",
+            default_value="",
+            required=False,
+        ),
     )
 
 
@@ -105,6 +114,7 @@ class NeteaseProvider(MusicProvider):
     """Netease Cloud Music provider implementation."""
 
     _api_url: str
+    _unblock_api_url: str | None
     _http_client: httpx.AsyncClient
 
     async def handle_async_init(self) -> None:
@@ -115,8 +125,16 @@ class NeteaseProvider(MusicProvider):
             raise ValueError(msg)
         # Remove trailing slash
         self._api_url = api_url.rstrip("/")
+
+        unblock_api_url = self.config.get_value(CONF_KEY_UNBLOCK_API_URL)
+        if unblock_api_url and isinstance(unblock_api_url, str) and unblock_api_url.strip():
+            self._unblock_api_url = unblock_api_url.rstrip("/")
+        else:
+            self._unblock_api_url = None
+
         self._http_client = httpx.AsyncClient(timeout=30.0)
-        _LOGGER.info("Netease Provider initialized with API URL: %s", self._api_url)
+        _LOGGER.info("Netease Provider initialized with API URL: %s, Unblock API URL: %s",
+                    self._api_url, self._unblock_api_url)
 
     async def close(self) -> None:
         """Cleanup on provider close."""
@@ -144,6 +162,30 @@ class NeteaseProvider(MusicProvider):
             return None
         except Exception as err:
             _LOGGER.error("Unexpected error while requesting %s: %s", url, err)
+            return None
+
+    async def _request_unblock_api(self, song_id: str) -> dict[str, Any] | None:
+        """Request unblock API to get alternative audio sources."""
+        if not self._unblock_api_url:
+            return None
+
+        url = f"{self._unblock_api_url}/match/{song_id}"
+        try:
+            _LOGGER.debug("Requesting unblock API: %s", url)
+            response = await self._http_client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("success") and data.get("audioUrl"):
+                _LOGGER.info("Successfully got unblocked URL for song %s from source: %s", song_id, data.get("source"))
+                return data
+            else:
+                _LOGGER.debug("Unblock API returned no valid result for song %s", song_id)
+                return None
+        except httpx.HTTPError as err:
+            _LOGGER.warning("HTTP error while requesting unblock API %s: %s", url, err)
+            return None
+        except Exception as err:
+            _LOGGER.warning("Unexpected error while requesting unblock API %s: %s", url, err)
             return None
 
     def _build_image(self, url: str | None, image_type: ImageType = ImageType.THUMB) -> MediaItemImage | None:
@@ -854,12 +896,34 @@ class NeteaseProvider(MusicProvider):
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Get streamdetails for a track/podcast episode."""
         if media_type == MediaType.TRACK:
-            # Get song URL
+            # First try unblock API if configured
+            if self._unblock_api_url:
+                unblock_data = await self._request_unblock_api(item_id)
+                if unblock_data and unblock_data.get("audioUrl"):
+                    _LOGGER.info("Using unblocked URL for track %s from source: %s", item_id, unblock_data.get("source"))
+                    return StreamDetails(
+                        provider=self.instance_id,
+                        item_id=item_id,
+                        audio_format=AudioFormat(
+                            content_type=ContentType.FLAC if unblock_data.get("type") == "flac" else ContentType.MP3,
+                            sample_rate=44100,
+                            bit_depth=16,
+                            channels=2,
+                        ),
+                        media_type=media_type,
+                        stream_type=StreamType.HTTP,
+                        path=unblock_data["audioUrl"],
+                        can_seek=True,
+                        allow_seek=True,
+                    )
+
+            # Fallback to original API
             data = await self._request("/song/url/v1", params={"id": item_id, "level": "hires"})
             if data and "data" in data and data["data"]:
                 song_url_data = data["data"][0]
                 url = song_url_data.get("url")
                 if url:
+                    _LOGGER.debug("Using original URL for track %s", item_id)
                     return StreamDetails(
                         provider=self.instance_id,
                         item_id=item_id,

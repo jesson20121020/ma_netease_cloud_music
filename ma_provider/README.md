@@ -24,8 +24,23 @@
    服务默认运行在 `http://localhost:3000`。
 
 2. **MusicAssistant 环境**
-   
+
    确保您已经安装并运行了 MusicAssistant。
+
+3. **可选：部署网易云音乐解锁 API**
+
+   如果您想获得无版权限制的音源，可以部署网易云音乐解锁 API 服务：
+
+   ```bash
+   # 进入 umc_server 目录
+   cd ../umc_server
+
+   # 构建并运行 Docker 容器
+   docker build -t netease-unblock-api .
+   docker run -d -p 3001:3000 --name netease-unblock-api netease-unblock-api
+   ```
+
+   服务将在 `http://localhost:3001` 运行。
 
 ## 安装方法
 
@@ -144,4 +159,3 @@ MIT License
 - [MusicAssistant 官方文档](https://music-assistant.io/)
 - [netease_cloud_music_api 项目](https://github.com/Binaryify/NeteaseCloudMusicApi)
 - [MusicAssistant DemoProvider](https://github.com/music-assistant/demo-provider)
-
