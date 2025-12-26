@@ -136,17 +136,7 @@ ma-netease-provider/
 └── README.md                # 说明文档
 ```
 
-### 本地开发
 
-1. 克隆仓库
-2. 安装开发依赖：
-   ```bash
-   pip install -e ".[dev]"
-   ```
-3. 运行测试（如果有）：
-   ```bash
-   pytest
-   ```
 
 ## 🔧 故障排查
 
@@ -236,10 +226,9 @@ docker run -d -p 3001:3000 netease-unblock
 ### 官方文档
 - 📖 [MusicAssistant 官方文档](https://music-assistant.io/)
 - 🎵 [网易云音乐 API 项目](https://github.com/Binaryify/NeteaseCloudMusicApi)
-- 🔧 [MusicAssistant Provider 开发指南](https://music-assistant.io/providers/)
 
 ### 相关项目
-- 🎯 [MusicAssistant Demo Provider](https://github.com/music-assistant/demo-provider)
+- 🎯 [MusicAssistant Demo Provider](https://github.com/music-assistant/server/tree/dev/music_assistant/providers/test)
 - 🚀 [UnblockNeteaseMusic Server](https://github.com/UnblockNeteaseMusic/server)
 
 ### 社区支持
@@ -254,4 +243,5 @@ docker run -d -p 3001:3000 netease-unblock
 
 Made with ❤️ for MusicAssistant community
 
+</div>
 </div>
