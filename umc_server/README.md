@@ -1,6 +1,8 @@
 # 网易云音乐解锁 API 服务器
 
-这是一个基于 UnblockNeteaseMusic 的 HTTP API 服务器，提供网易云音乐歌曲的音源获取服务。
+这是一个基于 [UnblockNeteaseMusic/server](https://github.com/UnblockNeteaseMusic/server) 的 HTTP API 服务器，在原有功能基础上提供了简洁的 REST API 接口，方便集成和调用。
+
+> **注意**: `server/` 目录下的代码来自于 [UnblockNeteaseMusic/server](https://github.com/UnblockNeteaseMusic/server) 仓库，本项目只是在此基础上添加了 API 服务器 (`api-server.js`) 和 Docker 部署配置，提供更便捷的 API 访问方式。
 
 ## 功能特性
 
