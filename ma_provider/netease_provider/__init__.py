@@ -366,6 +366,53 @@ class NeteaseProvider(MusicProvider):
             else:
                 _LOGGER.warning(f"Album data not found or invalid for ID: {item_id}. Response: {album_data}")
 
+        # Root browse: return popular artists
+        if item_id is None or item_id == "":
+            _LOGGER.info("Browsing root directory - returning popular artists")
+            try:
+                data = await self._request("/top/artists", params={"limit": 20, "offset": 0})
+                if data and "artists" in data:
+                    items = []
+                    for artist_data in data["artists"][:20]:  # Limit to 20 for browse performance
+                        try:
+                            artist_id = str(artist_data["id"])
+                            artist_name = artist_data.get("name", "Unknown Artist")
+
+                            # Get artist image URL
+                            pic_url = (
+                                artist_data.get("picUrl")
+                                or artist_data.get("img1v1Url")
+                                or artist_data.get("cover")
+                            )
+                            processed_pic_url = self._process_netease_image_url(pic_url) if pic_url else None
+
+                            items.append(
+                                BrowseFolderItem(
+                                    item_id=artist_id,
+                                    name=artist_name,
+                                    media_type=MediaType.ARTIST,
+                                    provider=self.instance_id,
+                                    playable=False,
+                                    thumbnail=processed_pic_url,
+                                )
+                            )
+                        except Exception as err:
+                            _LOGGER.warning(f"Failed to create browse item for artist: {artist_data.get('name', 'Unknown')}, error: {err}")
+                            continue
+
+                    _LOGGER.info(f"Created {len(items)} popular artist browse items")
+                    return BrowseFolder(
+                        item_id="",
+                        name="热门歌手",
+                        provider=self.instance_id,
+                        path="",
+                        items=items,
+                    )
+                else:
+                    _LOGGER.warning("Failed to get popular artists data for browse")
+            except Exception as err:
+                _LOGGER.error(f"Error browsing popular artists: {err}")
+
         # Default: return empty browse folder
         _LOGGER.info("Returning default empty browse folder")
         return BrowseFolder(
@@ -1068,3 +1115,14 @@ class NeteaseProvider(MusicProvider):
         # This is a streaming provider, so library is empty
         if False:  # noqa: YIELD
             yield
+
+    async def get_popular_artists(self, limit: int = 50) -> AsyncGenerator[Artist, None]:
+        """Get popular/hot artists from Netease Cloud Music."""
+        data = await self._request("/top/artists", params={"limit": limit, "offset": 0})
+        if not data or "artists" not in data:
+            return
+
+        for artist_data in data["artists"]:
+            artist = await self._parse_artist_from_search(artist_data)
+            if artist:
+                yield artist
