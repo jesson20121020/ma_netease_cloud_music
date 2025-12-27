@@ -527,6 +527,47 @@ class NeteaseProvider(MusicProvider):
             _LOGGER.error("Error parsing playlist from search: %s", err)
             return None
 
+    async def _parse_radio_from_search(self, program_data: dict[str, Any]) -> Radio | None:
+        """Parse Radio from search result (using program data)."""
+        try:
+            from music_assistant_models.media_items import Radio
+
+            program_id = str(program_data["id"])
+            name = program_data.get("name", "Unknown Radio Program")
+            images = self._build_images([program_data.get("coverUrl")] if program_data.get("coverUrl") else None)
+
+            # Get radio station info
+            radio_station_id = str(program_data.get("radio", {}).get("id", ""))
+            radio_station = None
+            if radio_station_id:
+                try:
+                    radio_station_data = await self._request("/dj/detail", params={"rid": radio_station_id})
+                    if radio_station_data and "data" in radio_station_data:
+                        radio_station = radio_station_data["data"].get("name", "Unknown Station")
+                except Exception:
+                    radio_station = "Unknown Station"
+
+            return Radio(
+                item_id=program_id,
+                provider=self.instance_id,
+                name=name,
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=program_id,
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                    )
+                },
+                metadata=MediaItemMetadata(
+                    images=images,
+                    description=program_data.get("description", ""),
+                ),
+                owner=radio_station,
+            )
+        except Exception as err:
+            _LOGGER.error("Error parsing radio from search: %s", err)
+            return None
+
     async def _parse_podcast_from_search(self, radio_data: dict[str, Any]) -> Podcast | None:
         """Parse Podcast from search result (using radio data)."""
         try:
@@ -1217,6 +1258,75 @@ class NeteaseProvider(MusicProvider):
                 _LOGGER.warning(f"Failed to parse radio as audiobook: {radio_name}, error: {err}")
 
         _LOGGER.info(f"Total yielded {count} audiobooks from get_library_audiobooks")
+
+    async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
+        """Retrieve library radios from the provider."""
+        _LOGGER.info("get_library_radios called - returning recommended radio programs")
+
+        # Use /program/recommend API to get recommended radio programs
+        _LOGGER.info("Requesting recommended radio programs from API: /program/recommend")
+        data = await self._request("/program/recommend", params={})
+
+        if not data or "programs" not in data:
+            _LOGGER.warning("No programs data returned from /program/recommend API")
+            return
+
+        programs_list = data["programs"]
+        _LOGGER.info(f"Received {len(programs_list)} recommended radio programs from API")
+
+        count = 0
+        for program_data in programs_list:
+            program_name = program_data.get("name", "Unknown Radio Program")
+            program_id = str(program_data.get("id", ""))
+
+            _LOGGER.debug(f"Processing radio program: {program_name} (ID: {program_id})")
+
+            # Parse radio program
+            radio = await self._parse_radio_from_search(program_data)
+            if radio:
+                count += 1
+                _LOGGER.debug(f"Successfully yielded radio {count}: {radio.name}")
+                yield radio
+            else:
+                _LOGGER.warning(f"Failed to parse radio program: {program_name}")
+
+        _LOGGER.info(f"Total yielded {count} radio programs from get_library_radios")
+
+    async def get_radio(self, prov_radio_id: str) -> Radio:
+        """Get full radio details by id."""
+        # Use /dj/program/detail to get radio program details
+        data = await self._request("/dj/program/detail", params={"id": prov_radio_id})
+        if not data or "program" not in data:
+            msg = f"Radio program {prov_radio_id} not found"
+            raise ValueError(msg)
+
+        program_data = data["program"]
+        program_id = str(program_data["id"])
+        name = program_data.get("name", "Unknown Radio Program")
+        
+        # Get radio station info
+        radio_station_id = str(program_data.get("radio", {}).get("id", ""))
+        radio_station = await self.get_podcast(radio_station_id) if radio_station_id else None
+
+        images = self._build_images([program_data.get("coverUrl")] if program_data.get("coverUrl") else None)
+
+        return Radio(
+            item_id=program_id,
+            provider=self.instance_id,
+            name=name,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=program_id,
+                    provider_domain=self.domain,
+                    provider_instance=self.instance_id,
+                )
+            },
+            metadata=MediaItemMetadata(
+                images=images,
+                description=program_data.get("description", ""),
+            ),
+            owner=radio_station.name if radio_station else "Unknown Station",
+        )
 
     async def get_popular_artists(self, limit: int = 50) -> AsyncGenerator[Artist, None]:
         """Get popular/hot artists from Netease Cloud Music."""
