@@ -977,15 +977,39 @@ class NeteaseProvider(MusicProvider):
     # Library methods - return empty for now as this is a streaming provider
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         """Retrieve library artists from the provider."""
+        _LOGGER.info("get_library_artists called - returning popular/hot artists as library")
+
         # For streaming provider, return popular/hot artists as library
+        _LOGGER.info("Requesting top artists from API: /top/artists with limit=50")
         data = await self._request("/top/artists", params={"limit": 50, "offset": 0})
-        if not data or "artists" not in data:
+
+        if not data:
+            _LOGGER.warning("No data returned from /top/artists API")
             return
 
-        for artist_data in data["artists"]:
+        if "artists" not in data:
+            _LOGGER.warning(f"No 'artists' key in API response. Response keys: {list(data.keys())}")
+            return
+
+        artists_list = data["artists"]
+        _LOGGER.info(f"Received {len(artists_list)} artists from API")
+
+        count = 0
+        for artist_data in artists_list:
+            artist_name = artist_data.get("name", "Unknown")
+            artist_id = artist_data.get("id", "Unknown")
+
+            _LOGGER.debug(f"Processing artist: {artist_name} (ID: {artist_id})")
+
             artist = await self._parse_artist_from_search(artist_data)
             if artist:
+                count += 1
+                _LOGGER.debug(f"Successfully yielded artist {count}: {artist.name}")
                 yield artist
+            else:
+                _LOGGER.warning(f"Failed to parse artist: {artist_name}")
+
+        _LOGGER.info(f"Total yielded {count} artists from get_library_artists")
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Retrieve library albums from the provider."""
