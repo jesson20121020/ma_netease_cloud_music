@@ -950,14 +950,28 @@ class NeteaseProvider(MusicProvider):
             try:
                 album_id = str(album_data["id"])
                 album_name = album_data.get("name", "Unknown Album")
-                
-                # Parse artists
+
+                # Parse artists - create minimal objects without fetching full details for speed
                 artists = UniqueList[Artist]()
                 if "artists" in album_data:
                     for artist_info in album_data["artists"]:
                         artist_id = str(artist_info["id"])
-                        artists.append(await self.get_artist(artist_id))
-                
+                        artist_name = artist_info.get("name", "Unknown Artist")
+                        artists.append(
+                            Artist(
+                                item_id=artist_id,
+                                provider=self.instance_id,
+                                name=artist_name,
+                                provider_mappings={
+                                    ProviderMapping(
+                                        item_id=artist_id,
+                                        provider_domain=self.domain,
+                                        provider_instance=self.instance_id,
+                                    )
+                                },
+                            )
+                        )
+
                 images = self._build_images([album_data.get("picUrl")] if album_data.get("picUrl") else None)
 
                 albums.append(
