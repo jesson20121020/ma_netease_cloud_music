@@ -1292,6 +1292,43 @@ class NeteaseProvider(MusicProvider):
 
         _LOGGER.info(f"Total yielded {count} radio programs from get_library_radios")
 
+    async def get_playlist(self, prov_playlist_id: str) -> Playlist:
+        """Get full playlist details by id."""
+        # Use /playlist/detail to get playlist details
+        data = await self._request("/playlist/detail", params={"id": prov_playlist_id})
+        if not data or "playlist" not in data:
+            msg = f"Playlist {prov_playlist_id} not found"
+            raise ValueError(msg)
+
+        playlist_data = data["playlist"]
+        playlist_id = str(playlist_data["id"])
+        name = playlist_data.get("name", "Unknown Playlist")
+        
+        # Get playlist owner
+        creator_data = playlist_data.get("creator", {})
+        owner = creator_data.get("nickname", "Unknown Owner")
+
+        images = self._build_images([playlist_data.get("coverImgUrl")] if playlist_data.get("coverImgUrl") else None)
+
+        return Playlist(
+            item_id=playlist_id,
+            provider=self.instance_id,
+            name=name,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=playlist_id,
+                    provider_domain=self.domain,
+                    provider_instance=self.instance_id,
+                )
+            },
+            metadata=MediaItemMetadata(
+                images=images,
+                description=playlist_data.get("description", ""),
+            ),
+            owner=owner,
+            is_editable=False,  # Netease playlists are typically not editable by users
+        )
+
     async def get_radio(self, prov_radio_id: str) -> Radio:
         """Get full radio details by id."""
         # Use /dj/program/detail to get radio program details
