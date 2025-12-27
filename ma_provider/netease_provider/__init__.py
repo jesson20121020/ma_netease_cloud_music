@@ -1088,9 +1088,15 @@ class NeteaseProvider(MusicProvider):
     # Library methods - return empty for now as this is a streaming provider
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         """Retrieve library artists from the provider."""
-        # This is a streaming provider, so library is empty
-        if False:  # noqa: YIELD
-            yield
+        # For streaming provider, return popular/hot artists as library
+        data = await self._request("/top/artists", params={"limit": 50, "offset": 0})
+        if not data or "artists" not in data:
+            return
+
+        for artist_data in data["artists"]:
+            artist = await self._parse_artist_from_search(artist_data)
+            if artist:
+                yield artist
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Retrieve library albums from the provider."""
