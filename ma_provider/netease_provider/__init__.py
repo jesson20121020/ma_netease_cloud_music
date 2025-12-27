@@ -287,6 +287,21 @@ class NeteaseProvider(MusicProvider):
             except Exception as err:
                 _LOGGER.error("Error searching artists: %s", err)
 
+        # Search for playlists
+        if MediaType.PLAYLIST in media_types:
+            try:
+                data = await self._request(
+                    "/search",
+                    params={"keywords": search_query, "type": NETEASE_SEARCH_TYPE_PLAYLIST, "limit": limit},
+                )
+                if data and "result" in data and "playlists" in data["result"]:
+                    for playlist_data in data["result"]["playlists"][:limit]:
+                        playlist = await self._parse_playlist_from_search(playlist_data)
+                        if playlist:
+                            result.playlists.append(playlist)
+            except Exception as err:
+                _LOGGER.error("Error searching playlists: %s", err)
+
         # Search for podcasts (radio)
         if MediaType.PODCAST in media_types:
             try:
@@ -480,6 +495,36 @@ class NeteaseProvider(MusicProvider):
             )
         except Exception as err:
             _LOGGER.error("Error parsing artist from search: %s", err)
+            return None
+
+    async def _parse_playlist_from_search(self, playlist_data: dict[str, Any]) -> Playlist | None:
+        """Parse Playlist from search result."""
+        try:
+            from music_assistant_models.media_items import Playlist
+
+            playlist_id = str(playlist_data["id"])
+            name = playlist_data.get("name", "Unknown Playlist")
+            images = self._build_images([playlist_data.get("coverImgUrl")] if playlist_data.get("coverImgUrl") else None)
+
+            return Playlist(
+                item_id=playlist_id,
+                provider=self.instance_id,
+                name=name,
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=playlist_id,
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                    )
+                },
+                metadata=MediaItemMetadata(
+                    images=images,
+                    description=playlist_data.get("description", ""),
+                ),
+                is_editable=False,  # Netease playlists are typically not editable by users
+            )
+        except Exception as err:
+            _LOGGER.error("Error parsing playlist from search: %s", err)
             return None
 
     async def _parse_podcast_from_search(self, radio_data: dict[str, Any]) -> Podcast | None:
@@ -1007,58 +1052,36 @@ class NeteaseProvider(MusicProvider):
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Retrieve library albums from the provider."""
-        _LOGGER.info("get_library_albums called - returning popular albums as library")
+        _LOGGER.info("get_library_albums called - returning newest albums as library")
 
-        # For streaming provider, return popular albums as library
-        # Netease API doesn't have a direct "top albums" endpoint, so we'll use top playlists
-        # and extract albums from playlist songs, or use a different approach
-        _LOGGER.info("Requesting top playlists from API to get popular albums")
-        data = await self._request("/top/playlist", params={"limit": 20, "offset": 0, "cat": "全部"})
+        # Use /album/newest API to get the latest albums
+        _LOGGER.info("Requesting newest albums from API: /album/newest")
+        data = await self._request("/album/newest", params={})
 
-        if not data or "playlists" not in data:
-            _LOGGER.warning("No playlists data returned from /top/playlist API")
+        if not data or "albums" not in data:
+            _LOGGER.warning("No albums data returned from /album/newest API")
             return
 
-        playlists = data["playlists"][:5]  # Limit to 5 playlists to avoid too many requests
-        _LOGGER.info(f"Processing {len(playlists)} top playlists for albums")
+        albums_list = data["albums"]
+        _LOGGER.info(f"Received {len(albums_list)} newest albums from API")
 
-        processed_albums = set()  # Track processed album IDs
+        count = 0
+        for album_data in albums_list:
+            album_name = album_data.get("name", "Unknown Album")
+            album_id = str(album_data.get("id", ""))
 
-        for playlist in playlists:
-            playlist_id = str(playlist["id"])
-            _LOGGER.debug(f"Getting tracks from playlist: {playlist_id}")
+            _LOGGER.debug(f"Processing newest album: {album_name} (ID: {album_id})")
 
-            # Get playlist details to extract albums
-            playlist_data = await self._request("/playlist/detail", params={"id": playlist_id})
-            if not playlist_data or "playlist" not in playlist_data:
-                continue
+            # Parse album
+            album = await self._parse_album_from_search(album_data)
+            if album:
+                count += 1
+                _LOGGER.debug(f"Successfully yielded album {count}: {album.name}")
+                yield album
+            else:
+                _LOGGER.warning(f"Failed to parse album: {album_name}")
 
-            tracks = playlist_data["playlist"].get("tracks", [])[:10]  # Limit tracks per playlist
-            for track in tracks:
-                if "al" in track and track["al"]:
-                    album_data = track["al"]
-                    album_id = str(album_data["id"])
-
-                    if album_id in processed_albums:
-                        continue
-
-                    processed_albums.add(album_id)
-                    album_name = album_data.get("name", "Unknown Album")
-
-                    _LOGGER.debug(f"Processing album: {album_name} (ID: {album_id})")
-
-                    # Parse album
-                    album = await self._parse_album_from_search(album_data)
-                    if album:
-                        _LOGGER.debug(f"Successfully yielded album: {album.name}")
-                        yield album
-
-                        # Limit total albums returned
-                        if len(processed_albums) >= 20:
-                            _LOGGER.info("Reached album limit (20), stopping")
-                            return
-
-        _LOGGER.info(f"Total yielded {len(processed_albums)} albums from get_library_albums")
+        _LOGGER.info(f"Total yielded {count} albums from get_library_albums")
 
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
         """Retrieve library tracks from the provider."""
