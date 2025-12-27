@@ -329,46 +329,31 @@ class NeteaseProvider(MusicProvider):
                     song_name = song_data.get('name', 'Unknown')
                     _LOGGER.info(f"Processing song: {song_name}")
 
-                    # Get detailed track info for accurate cover images
-                    track_details = await self._batch_fetch_track_details([str(song_data["id"])])
-                    detail_data = track_details.get(str(song_data["id"]))
+                    # For browse speed optimization, skip detailed track fetch and use album cover
+                    # Determine cover URL: prefer song picUrl, fallback to album picUrl
+                    cover_url = song_data.get("picUrl") or album_cover_url
+                    processed_cover_url = self._process_netease_image_url(cover_url) if cover_url else None
 
-                    # Determine cover URL with priority: song picUrl > album picUrl
-                    cover_url = None
-                    if detail_data:
-                        # Prefer song's own picUrl from detailed data
-                        cover_url = detail_data.get("picUrl")
-                        if not cover_url:
-                            # Fallback to album picUrl from detailed data
-                            cover_url = detail_data.get("al", {}).get("picUrl")
+                    _LOGGER.info(f"Song '{song_name}' cover URL: {processed_cover_url}")
 
-                    if not cover_url:
-                        # Fallback to search data
-                        cover_url = song_data.get("picUrl") or album_cover_url
-
-                    _LOGGER.info(f"Song '{song_name}' cover URL: {cover_url}")
-
-                    # Create track with individual cover
-                    track = await self._parse_track_from_search(song_data, detail_data)
-                    if track:
-                        # Override the track's image with song-specific cover if available
-                        if cover_url and (not track.metadata.images or track.metadata.images[0].path != self._process_netease_image_url(cover_url)):
-                            processed_cover_url = self._process_netease_image_url(cover_url)
-                            track.metadata.images = self._build_images([processed_cover_url])
+                    # Create minimal track info for browse (no detailed fetch for speed)
+                    try:
+                        song_id = str(song_data["id"])
+                        track_name = song_data.get("name", "Unknown")
 
                         items.append(
                             BrowseFolderItem(
-                                item_id=track.item_id,
-                                name=track.name,
+                                item_id=song_id,
+                                name=track_name,
                                 media_type=MediaType.TRACK,
                                 provider=self.instance_id,
                                 playable=True,
-                                thumbnail=track.metadata.images[0].path if track.metadata.images else None,
+                                thumbnail=processed_cover_url,
                             )
                         )
-                        _LOGGER.info(f"Successfully created browse item for: {track.name} with cover: {track.metadata.images[0].path if track.metadata.images else 'None'}")
-                    else:
-                        _LOGGER.warning(f"Failed to create track for song: {song_name}")
+                        _LOGGER.info(f"Successfully created browse item for: {track_name} with cover: {processed_cover_url}")
+                    except Exception as err:
+                        _LOGGER.warning(f"Failed to create browse item for song: {song_name}, error: {err}")
 
                 _LOGGER.info(f"Created {len(items)} browse items")
                 return BrowseFolder(
