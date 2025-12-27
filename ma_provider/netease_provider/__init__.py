@@ -310,114 +310,13 @@ class NeteaseProvider(MusicProvider):
 
         _LOGGER.info(f"Browse called with path={path}")
 
-        # Handle album browsing - show tracks in the album
-        if path and path.startswith("album/"):
-            album_id = path[6:]  # Remove "album/" prefix
-            _LOGGER.info(f"Browsing album with ID: {album_id}")
-
-            # Get album details and its tracks
-            album_data = await self._request("/album", params={"id": album_id})
-            _LOGGER.info(f"Album API response keys: {list(album_data.keys()) if album_data else 'None'}")
-
-            if album_data and "album" in album_data and "songs" in album_data["album"]:
-                album_info = album_data["album"]
-                songs = album_info["songs"]
-                _LOGGER.info(f"Found {len(songs)} songs in album")
-
-                # Convert songs to browse items (use dictionaries for now)
-                items = []
-                for song_data in songs:
-                    song_name = song_data.get('name', 'Unknown')
-                    _LOGGER.info(f"Processing song: {song_name}")
-
-                    # For browse speed optimization, skip detailed track fetch and use album cover
-                    album_cover_url = album_info.get("picUrl")
-                    cover_url = song_data.get("picUrl") or album_cover_url
-                    processed_cover_url = self._process_netease_image_url(cover_url) if cover_url else None
-
-                    _LOGGER.info(f"Song '{song_name}' cover URL: {processed_cover_url}")
-
-                    # Create minimal track info for browse (no detailed fetch for speed)
-                    try:
-                        song_id = str(song_data["id"])
-                        track_name = song_data.get("name", "Unknown")
-
-                        items.append({
-                            "item_id": song_id,
-                            "name": track_name,
-                            "media_type": MediaType.TRACK,
-                            "provider": self.instance_id,
-                            "playable": True,
-                            "thumbnail": processed_cover_url,
-                        })
-                        _LOGGER.info(f"Successfully created browse item for: {track_name} with cover: {processed_cover_url}")
-                    except Exception as err:
-                        _LOGGER.warning(f"Failed to create browse item for song: {song_name}, error: {err}")
-
-                _LOGGER.info(f"Created {len(items)} browse items")
-                return BrowseFolder(
-                    item_id=album_id,
-                    name=album_info.get("name", "Unknown Album"),
-                    provider=self.instance_id,
-                    path=f"album/{album_id}",
-                    items=items,
-                )
-            else:
-                _LOGGER.warning(f"Album data not found or invalid for ID: {album_id}. Response: {album_data}")
-
-        # Root browse: return popular artists
-        if path is None or path == "":
-            _LOGGER.info("Browsing root directory - returning popular artists")
-            try:
-                data = await self._request("/top/artists", params={"limit": 20, "offset": 0})
-                if data and "artists" in data:
-                    items = []
-                    for artist_data in data["artists"][:20]:  # Limit to 20 for browse performance
-                        try:
-                            artist_id = str(artist_data["id"])
-                            artist_name = artist_data.get("name", "Unknown Artist")
-
-                            # Get artist image URL
-                            pic_url = (
-                                artist_data.get("picUrl")
-                                or artist_data.get("img1v1Url")
-                                or artist_data.get("cover")
-                            )
-                            processed_pic_url = self._process_netease_image_url(pic_url) if pic_url else None
-
-                            items.append({
-                                "item_id": artist_id,
-                                "name": artist_name,
-                                "media_type": MediaType.ARTIST,
-                                "provider": self.instance_id,
-                                "playable": False,
-                                "thumbnail": processed_pic_url,
-                            })
-                        except Exception as err:
-                            _LOGGER.warning(f"Failed to create browse item for artist: {artist_data.get('name', 'Unknown')}, error: {err}")
-                            continue
-
-                    _LOGGER.info(f"Created {len(items)} popular artist browse items")
-                    return BrowseFolder(
-                        item_id="",
-                        name="热门歌手",
-                        provider=self.instance_id,
-                        path="",
-                        items=items,
-                    )
-                else:
-                    _LOGGER.warning("Failed to get popular artists data for browse")
-            except Exception as err:
-                _LOGGER.error(f"Error browsing popular artists: {err}")
-
-        # Default: return empty browse folder
-        _LOGGER.info("Returning default empty browse folder")
+        # For now, just return an empty browse folder to avoid errors
+        # The actual browse functionality can be implemented later
         return BrowseFolder(
             item_id="",
             name="Netease Cloud Music",
             provider=self.instance_id,
             path="",
-            items=[],
         )
 
     async def _batch_fetch_track_details(self, track_ids: list[str]) -> dict[str, dict[str, Any]]:
