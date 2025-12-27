@@ -306,7 +306,7 @@ class NeteaseProvider(MusicProvider):
 
     async def browse(self, path: str | None = None) -> BrowseFolder:
         """Browse the provider's media library."""
-        from music_assistant_models.media_items import BrowseFolder, BrowseFolderItem
+        from music_assistant_models.media_items import BrowseFolder
 
         _LOGGER.info(f"Browse called with path={path}")
 
@@ -324,7 +324,7 @@ class NeteaseProvider(MusicProvider):
                 songs = album_info["songs"]
                 _LOGGER.info(f"Found {len(songs)} songs in album")
 
-                # Convert songs to BrowseFolderItems
+                # Convert songs to browse items (use dictionaries for now)
                 items = []
                 for song_data in songs:
                     song_name = song_data.get('name', 'Unknown')
@@ -342,16 +342,14 @@ class NeteaseProvider(MusicProvider):
                         song_id = str(song_data["id"])
                         track_name = song_data.get("name", "Unknown")
 
-                        items.append(
-                            BrowseFolderItem(
-                                item_id=song_id,
-                                name=track_name,
-                                media_type=MediaType.TRACK,
-                                provider=self.instance_id,
-                                playable=True,
-                                thumbnail=processed_cover_url,
-                            )
-                        )
+                        items.append({
+                            "item_id": song_id,
+                            "name": track_name,
+                            "media_type": MediaType.TRACK,
+                            "provider": self.instance_id,
+                            "playable": True,
+                            "thumbnail": processed_cover_url,
+                        })
                         _LOGGER.info(f"Successfully created browse item for: {track_name} with cover: {processed_cover_url}")
                     except Exception as err:
                         _LOGGER.warning(f"Failed to create browse item for song: {song_name}, error: {err}")
@@ -387,16 +385,14 @@ class NeteaseProvider(MusicProvider):
                             )
                             processed_pic_url = self._process_netease_image_url(pic_url) if pic_url else None
 
-                            items.append(
-                                BrowseFolderItem(
-                                    item_id=artist_id,
-                                    name=artist_name,
-                                    media_type=MediaType.ARTIST,
-                                    provider=self.instance_id,
-                                    playable=False,
-                                    thumbnail=processed_pic_url,
-                                )
-                            )
+                            items.append({
+                                "item_id": artist_id,
+                                "name": artist_name,
+                                "media_type": MediaType.ARTIST,
+                                "provider": self.instance_id,
+                                "playable": False,
+                                "thumbnail": processed_pic_url,
+                            })
                         except Exception as err:
                             _LOGGER.warning(f"Failed to create browse item for artist: {artist_data.get('name', 'Unknown')}, error: {err}")
                             continue
