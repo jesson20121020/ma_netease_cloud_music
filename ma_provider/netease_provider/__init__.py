@@ -304,20 +304,13 @@ class NeteaseProvider(MusicProvider):
 
         return result
 
-    async def browse(self, path: str | None = None) -> BrowseFolder:
+    async def browse(self, path: str | None = None) -> list:
         """Browse the provider's media library."""
-        from music_assistant_models.media_items import BrowseFolder
-
         _LOGGER.info(f"Browse called with path={path}")
 
-        # For now, just return an empty browse folder to avoid errors
+        # For now, just return an empty list to avoid errors
         # The actual browse functionality can be implemented later
-        return BrowseFolder(
-            item_id="",
-            name="Netease Cloud Music",
-            provider=self.instance_id,
-            path="",
-        )
+        return []
 
     async def _batch_fetch_track_details(self, track_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Batch fetch track details for accurate cover images."""
