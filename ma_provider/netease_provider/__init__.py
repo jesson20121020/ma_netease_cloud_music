@@ -304,18 +304,19 @@ class NeteaseProvider(MusicProvider):
 
         return result
 
-    async def browse(self, item_id: str | None = None, item_type: MediaType | None = None) -> BrowseFolder:
+    async def browse(self, path: str | None = None) -> BrowseFolder:
         """Browse the provider's media library."""
         from music_assistant_models.media_items import BrowseFolder, BrowseFolderItem
 
-        _LOGGER.info(f"Browse called with item_id={item_id}, item_type={item_type}")
+        _LOGGER.info(f"Browse called with path={path}")
 
         # Handle album browsing - show tracks in the album
-        if item_type == MediaType.ALBUM and item_id:
-            _LOGGER.info(f"Browsing album with ID: {item_id}")
+        if path and path.startswith("album/"):
+            album_id = path[6:]  # Remove "album/" prefix
+            _LOGGER.info(f"Browsing album with ID: {album_id}")
 
             # Get album details and its tracks
-            album_data = await self._request("/album", params={"id": item_id})
+            album_data = await self._request("/album", params={"id": album_id})
             _LOGGER.info(f"Album API response keys: {list(album_data.keys()) if album_data else 'None'}")
 
             if album_data and "album" in album_data and "songs" in album_data["album"]:
@@ -330,7 +331,7 @@ class NeteaseProvider(MusicProvider):
                     _LOGGER.info(f"Processing song: {song_name}")
 
                     # For browse speed optimization, skip detailed track fetch and use album cover
-                    # Determine cover URL: prefer song picUrl, fallback to album picUrl
+                    album_cover_url = album_info.get("picUrl")
                     cover_url = song_data.get("picUrl") or album_cover_url
                     processed_cover_url = self._process_netease_image_url(cover_url) if cover_url else None
 
@@ -357,17 +358,17 @@ class NeteaseProvider(MusicProvider):
 
                 _LOGGER.info(f"Created {len(items)} browse items")
                 return BrowseFolder(
-                    item_id=item_id,
+                    item_id=album_id,
                     name=album_info.get("name", "Unknown Album"),
                     provider=self.instance_id,
-                    path=f"album/{item_id}",
+                    path=f"album/{album_id}",
                     items=items,
                 )
             else:
-                _LOGGER.warning(f"Album data not found or invalid for ID: {item_id}. Response: {album_data}")
+                _LOGGER.warning(f"Album data not found or invalid for ID: {album_id}. Response: {album_data}")
 
         # Root browse: return popular artists
-        if item_id is None or item_id == "":
+        if path is None or path == "":
             _LOGGER.info("Browsing root directory - returning popular artists")
             try:
                 data = await self._request("/top/artists", params={"limit": 20, "offset": 0})
