@@ -304,13 +304,7 @@ class NeteaseProvider(MusicProvider):
 
         return result
 
-    async def browse(self, path: str | None = None) -> list:
-        """Browse the provider's media library."""
-        _LOGGER.info(f"Browse called with path={path}")
 
-        # For now, just return an empty list to avoid errors
-        # The actual browse functionality can be implemented later
-        return []
 
     async def _batch_fetch_track_details(self, track_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Batch fetch track details for accurate cover images."""
