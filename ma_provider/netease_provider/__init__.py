@@ -1377,8 +1377,8 @@ class NeteaseProvider(MusicProvider):
             is_editable=False,  # Netease playlists are typically not editable by users
         )
 
-    async def get_playlist_tracks(self, prov_playlist_id: str, offset: int, limit: int) -> AsyncGenerator[Track, None]:
-        """Get playlist tracks by id with offset and limit for pagination."""
+    async def get_playlist_tracks(self, prov_playlist_id: str, page: int, size: int) -> AsyncGenerator[Track, None]:
+        """Get playlist tracks by id with page and size for pagination."""
         # Use /playlist/track/all to get all tracks in playlist
         data = await self._request("/playlist/track/all", params={"id": prov_playlist_id})
         if not data or "songs" not in data:
@@ -1394,9 +1394,9 @@ class NeteaseProvider(MusicProvider):
 
         _LOGGER.info(f"Found {len(songs)} songs in playlist {prov_playlist_id}")
 
-        # Apply offset and limit for pagination
-        start_index = offset
-        end_index = offset + limit
+        # Apply pagination: page is 0-indexed, size is number of items per page
+        start_index = page * size
+        end_index = start_index + size
         paginated_songs = songs[start_index:end_index]
 
         # Batch fetch track details for accurate cover images
