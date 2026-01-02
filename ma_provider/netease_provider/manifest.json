@@ -8,5 +8,19 @@
   "requirements": [],
   "documentation": "",
   "multi_instance": true,
-  "builtin": false
+  "builtin": false,
+  "modules": [
+    {
+      "type": "music",
+      "domain": "netease_provider",
+      "name": "Netease Cloud Music Provider",
+      "module": "ma_provider.netease_provider"
+    },
+    {
+      "type": "metadata",
+      "domain": "netease_metadata_provider",
+      "name": "Netease Cloud Music Metadata Provider",
+      "module": "ma_provider.netease_provider.netease_metadata_provider"
+    }
+  ]
 }

@@ -47,6 +47,9 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Export the metadata provider class so it can be imported by the metadata provider module
+from .netease_metadata_provider import NeteaseMetadataProvider  # noqa: F401
+
 
 CONF_KEY_API_URL = "api_url"
 CONF_KEY_UNBLOCK_API_URL = "unblock_api_url"
@@ -71,7 +74,6 @@ SUPPORTED_FEATURES = {
     ProviderFeature.PLAYLIST_CREATE,
     ProviderFeature.PLAYLIST_TRACKS_EDIT,
     ProviderFeature.LYRICS,
-    ProviderFeature.TRACK_METADATA,
 }
 
 
@@ -1166,48 +1168,6 @@ class NeteaseProvider(MusicProvider):
             ),
             owner=radio_station.name if radio_station else "Unknown Station",
         )
-
-    async def get_track_metadata(self, track: Track) -> MediaItemMetadata | None:
-        """Retrieve metadata for a track, including lyrics if not already present."""
-        # Check if lyrics are already available in the track metadata
-        if track.metadata and (track.metadata.lyrics or track.metadata.lrc_lyrics):
-            self.logger.debug("Skipping lyrics lookup for %s: Already has lyrics", track.name)
-            return None
-
-        # Ensure we have both track name and artist information
-        if not track.name or len(track.name.strip()) == 0:
-            self.logger.info("Skipping lyrics lookup for track: No track name information")
-            return None
-
-        if not track.artists:
-            self.logger.info("Skipping lyrics lookup for %s: No artist information", track.name)
-            return None
-
-        # Find a track with a provider mapping to get the provider track ID
-        prov_track_id = None
-        for prov_mapping in track.provider_mappings:
-            if prov_mapping.provider_instance == self.instance_id:
-                prov_track_id = prov_mapping.item_id
-                break
-
-        # If we don't have a provider-specific track ID, we can't look up lyrics
-        if not prov_track_id:
-            self.logger.info("Skipping lyrics lookup for %s: No provider mapping found", track.name)
-            return None
-
-        # Get lyrics using the existing get_lyrics method
-        track_lyrics = await self.get_lyrics(prov_track_id)
-
-        if track_lyrics:
-            # Create and return new metadata with lyrics
-            metadata = MediaItemMetadata()
-            metadata.lyrics = track_lyrics
-
-            self.logger.debug("Found lyrics for %s", track.name)
-            return metadata
-
-        self.logger.info("No lyrics found for %s", track.name)
-        return None
 
     async def get_lyrics(self, prov_track_id: str) -> str | None:
         """Get lyrics for a given track id."""
