@@ -1377,26 +1377,27 @@ class NeteaseProvider(MusicProvider):
             is_editable=False,  # Netease playlists are typically not editable by users
         )
 
-    async def get_playlist_tracks(self, prov_playlist_id: str, page: int, size: int) -> AsyncGenerator[Track, None]:
-        """Get playlist tracks by id with page and size for pagination."""
+    async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
+        """Get playlist tracks by id with page for pagination."""
         # Use /playlist/track/all to get all tracks in playlist
         data = await self._request("/playlist/track/all", params={"id": prov_playlist_id})
         if not data or "songs" not in data:
             # Alternative API endpoint might be needed
             _LOGGER.warning(f"No songs returned from playlist/track/all for playlist {prov_playlist_id}")
             # Try using playlist detail endpoint which might include tracks
-            detail_data = await self._request("/playlist/detail", params={"id": prov_playlist_id, "limit": 1000})
+            detail_data = await self._request("/playlist/detail", params={"id": prov_playlist_id, "limit": 100})
             if not detail_data or "playlist" not in detail_data:
-                return
+                return []
             songs = detail_data["playlist"].get("tracks", [])
         else:
             songs = data["songs"]
 
         _LOGGER.info(f"Found {len(songs)} songs in playlist {prov_playlist_id}")
 
-        # Apply pagination: page is 0-indexed, size is number of items per page
-        start_index = page * size
-        end_index = start_index + size
+        # Apply pagination: page is 0-indexed, default page size is 50
+        page_size = 50
+        start_index = page * page_size
+        end_index = start_index + page_size
         paginated_songs = songs[start_index:end_index]
 
         # Batch fetch track details for accurate cover images
@@ -1404,14 +1405,16 @@ class NeteaseProvider(MusicProvider):
         _LOGGER.info(f"Batch fetching details for {len(track_ids)} tracks")
         track_details = await self._batch_fetch_track_details(track_ids)
 
+        tracks = []
         for idx, song_data in enumerate(paginated_songs):
             _LOGGER.debug(f"Processing playlist track {idx+1}: {song_data.get('name', 'Unknown')}")
             track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
             if track:
-                _LOGGER.debug(f"Yielding playlist track: {track.name}")
-                yield track
+                _LOGGER.debug(f"Adding playlist track: {track.name}")
+                tracks.append(track)
             else:
                 _LOGGER.warning(f"Failed to parse playlist track: {song_data.get('name', 'Unknown')}")
+        return tracks
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
         """Get full radio details by id."""
