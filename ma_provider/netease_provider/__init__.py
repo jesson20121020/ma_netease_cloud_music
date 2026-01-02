@@ -941,7 +941,7 @@ class NeteaseProvider(MusicProvider):
                         can_seek=True,
                         allow_seek=True,
                     )
-        elif media_type == MediaType.PODCAST or media_type == MediaType.EPISODE:
+        elif media_type == MediaType.PODCAST or media_type == MediaType.RADIO:
             # For podcast episodes, get the program detail and extract audio URL
             data = await self._request("/dj/program/detail", params={"id": item_id})
             if data and "program" in data:
@@ -966,7 +966,7 @@ class NeteaseProvider(MusicProvider):
                             bit_depth=16,
                             channels=2,
                         ),
-                        media_type=MediaType.PODCAST if media_type == MediaType.PODCAST else MediaType.EPISODE,
+                        media_type=MediaType.PODCAST if media_type == MediaType.PODCAST else MediaType.RADIO,
                         stream_type=StreamType.HTTP,
                         path=audio_url,
                         can_seek=True,
