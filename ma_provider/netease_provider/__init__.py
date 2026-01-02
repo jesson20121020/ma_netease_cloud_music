@@ -68,6 +68,8 @@ SUPPORTED_FEATURES = {
     ProviderFeature.LIBRARY_PLAYLISTS,
     ProviderFeature.ARTIST_ALBUMS,
     ProviderFeature.ARTIST_TOPTRACKS,
+    ProviderFeature.PLAYLIST_CREATE,
+    ProviderFeature.PLAYLIST_TRACKS_EDIT,
 }
 
 
