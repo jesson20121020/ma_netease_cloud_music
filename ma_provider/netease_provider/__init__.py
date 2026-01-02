@@ -47,9 +47,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Export the metadata provider class so it can be imported by the metadata provider module
-from .netease_metadata_provider import NeteaseMetadataProvider  # noqa: F401
-
 
 CONF_KEY_API_URL = "api_url"
 CONF_KEY_UNBLOCK_API_URL = "unblock_api_url"

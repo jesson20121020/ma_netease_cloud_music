@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
 
+from ..netease_provider import NeteaseProvider
+
 _LOGGER = logging.getLogger(__name__)
 
 
