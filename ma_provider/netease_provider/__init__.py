@@ -70,6 +70,7 @@ SUPPORTED_FEATURES = {
     ProviderFeature.ARTIST_TOPTRACKS,
     ProviderFeature.PLAYLIST_CREATE,
     ProviderFeature.PLAYLIST_TRACKS_EDIT,
+    ProviderFeature.LYRICS,
 }
 
 
@@ -1164,6 +1165,30 @@ class NeteaseProvider(MusicProvider):
             ),
             owner=radio_station.name if radio_station else "Unknown Station",
         )
+
+    async def get_lyrics(self, prov_track_id: str) -> str | None:
+        """Get lyrics for a given track id."""
+        _LOGGER.info(f"get_lyrics called for track ID: {prov_track_id}")
+
+        # Use the /lyric endpoint to get lyrics for the track
+        data = await self._request("/lyric", params={"id": prov_track_id})
+        if not data:
+            _LOGGER.warning(f"No lyrics data returned from API for track {prov_track_id}")
+            return None
+
+        # Netease API typically returns lyrics in the 'lrc' field with 'lyric' subfield
+        lrc_data = data.get("lrc")
+        if not lrc_data or "lyric" not in lrc_data:
+            _LOGGER.warning(f"No lyrics found in API response for track {prov_track_id}")
+            return None
+
+        lyrics_text = lrc_data["lyric"]
+        if not lyrics_text:
+            _LOGGER.warning(f"Empty lyrics returned from API for track {prov_track_id}")
+            return None
+
+        _LOGGER.info(f"Successfully retrieved lyrics for track {prov_track_id}")
+        return lyrics_text
 
     async def get_popular_artists(self, limit: int = 50) -> AsyncGenerator[Artist, None]:
         """Get popular/hot artists from Netease Cloud Music."""
