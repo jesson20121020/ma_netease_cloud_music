@@ -619,6 +619,8 @@ class NeteaseProvider(MusicProvider):
         cover_url = song_pic_url or album_pic_url
         images = self._build_images([cover_url] if cover_url else None)
 
+        track_lyrics = await self.get_lyrics(prov_track_id)
+
         return Track(
             item_id=song_id,
             provider=self.instance_id,
@@ -633,7 +635,7 @@ class NeteaseProvider(MusicProvider):
                     provider_instance=self.instance_id,
                 )
             },
-            metadata=MediaItemMetadata(images=images),
+            metadata=MediaItemMetadata(images=images, lyrics=track_lyrics),
             disc_number=song_data.get("cd", 1),
             track_number=song_data.get("no", 1),
         )
