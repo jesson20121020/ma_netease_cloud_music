@@ -65,9 +65,9 @@ SUPPORTED_FEATURES = {
     ProviderFeature.LIBRARY_ARTISTS,
     ProviderFeature.LIBRARY_ALBUMS,
     ProviderFeature.LIBRARY_TRACKS,
-    ProviderFeature.LIBRARY_PODCASTS,
-    ProviderFeature.LIBRARY_AUDIOBOOKS,
+    ProviderFeature.LIBRARY_PLAYLISTS,
     ProviderFeature.ARTIST_ALBUMS,
+    ProviderFeature.ARTIST_TOPTRACKS,
 }
 
 
@@ -236,7 +236,7 @@ class NeteaseProvider(MusicProvider):
     ) -> SearchResults:
         """Perform search on the provider."""
         if not media_types:
-            media_types = [MediaType.TRACK, MediaType.ALBUM, MediaType.ARTIST, MediaType.PODCAST]
+            media_types = [MediaType.TRACK, MediaType.ALBUM, MediaType.ARTIST]
 
         result = SearchResults()
 
@@ -302,21 +302,6 @@ class NeteaseProvider(MusicProvider):
                             result.playlists.append(playlist)
             except Exception as err:
                 _LOGGER.error("Error searching playlists: %s", err)
-
-        # Search for podcasts (radio)
-        if MediaType.PODCAST in media_types:
-            try:
-                data = await self._request(
-                    "/search",
-                    params={"keywords": search_query, "type": NETEASE_SEARCH_TYPE_RADIO, "limit": limit},
-                )
-                if data and "result" in data and "djRadios" in data["result"]:
-                    for radio_data in data["result"]["djRadios"][:limit]:
-                        podcast = await self._parse_podcast_from_search(radio_data)
-                        if podcast:
-                            result.podcasts.append(podcast)
-            except Exception as err:
-                _LOGGER.error("Error searching podcasts: %s", err)
 
         return result
 
@@ -397,6 +382,8 @@ class NeteaseProvider(MusicProvider):
             if not cover_url:
                 # Fallback to search data
                 song_pic_url = song_data.get("picUrl")
+                album_data = song_data.get("album", {}) if "album" in song_data else {}
+                album_cover_url = album_data.get("picUrl") if album_data else None
                 cover_url = song_pic_url or album_cover_url
             images = self._build_images([cover_url] if cover_url else None)
 
@@ -415,8 +402,8 @@ class NeteaseProvider(MusicProvider):
                     )
                 },
                 metadata=MediaItemMetadata(images=images),
-                disc_number=song_data.get("disc", 1),
-                track_number=song_data.get("trackNo", 1),
+                disc_number=song_data.get("cd", 1) if song_data.get("cd") else 1,
+                track_number=song_data.get("no", 1) if song_data.get("no") else 1,
             )
         except Exception as err:
             _LOGGER.error("Error parsing track from search: %s", err)
@@ -730,172 +717,8 @@ class NeteaseProvider(MusicProvider):
             year=album_data.get("publishTime", 0) // 10000 if album_data.get("publishTime") else None,
         )
 
-    async def get_podcast(self, prov_podcast_id: str) -> Podcast:
-        """Get full podcast details by id (using radio API)."""
-        data = await self._request("/dj/detail", params={"rid": prov_podcast_id})
-        if not data or "data" not in data:
-            msg = f"Podcast {prov_podcast_id} not found"
-            raise ValueError(msg)
-
-        radio_data = data["data"]
-        radio_id = str(radio_data["id"])
-        name = radio_data.get("name", "Unknown Radio")
-        images = self._build_images([radio_data.get("picUrl")] if radio_data.get("picUrl") else None)
-
-        return Podcast(
-            item_id=radio_id,
-            provider=self.instance_id,
-            name=name,
-            provider_mappings={
-                ProviderMapping(
-                    item_id=radio_id,
-                    provider_domain=self.domain,
-                    provider_instance=self.instance_id,
-                )
-            },
-            metadata=MediaItemMetadata(
-                images=images,
-                description=radio_data.get("desc", ""),
-            ),
-            publisher=radio_data.get("dj", {}).get("nickname", "Unknown Publisher"),
-        )
-
-    async def get_audiobook(self, prov_audiobook_id: str) -> Audiobook:
-        """Get full audiobook details by id (using radio API for now)."""
-        # Note: NeteaseCloudMusicApi might have specific audiobook endpoints
-        # For now, we'll use the radio/dj endpoint as a fallback
-        data = await self._request("/dj/detail", params={"rid": prov_audiobook_id})
-        if not data or "data" not in data:
-            msg = f"Audiobook {prov_audiobook_id} not found"
-            raise ValueError(msg)
-
-        radio_data = data["data"]
-        radio_id = str(radio_data["id"])
-        name = radio_data.get("name", "Unknown Audiobook")
-        images = self._build_images([radio_data.get("picUrl")] if radio_data.get("picUrl") else None)
-
-        return Audiobook(
-            item_id=radio_id,
-            provider=self.instance_id,
-            name=name,
-            provider_mappings={
-                ProviderMapping(
-                    item_id=radio_id,
-                    provider_domain=self.domain,
-                    provider_instance=self.instance_id,
-                )
-            },
-            metadata=MediaItemMetadata(
-                images=images,
-                description=radio_data.get("desc", ""),
-            ),
-            publisher=radio_data.get("dj", {}).get("nickname", "Unknown Publisher"),
-            authors=UniqueList([radio_data.get("dj", {}).get("nickname", "Unknown Author")]),
-            duration=0,  # Will be calculated from episodes if available
-        )
-
-    async def get_podcast_episodes(
-        self,
-        prov_podcast_id: str,
-    ) -> AsyncGenerator[PodcastEpisode, None]:
-        """Get all PodcastEpisodes for given podcast id."""
-        # Use /dj/program to get radio programs
-        data = await self._request("/dj/program", params={"rid": prov_podcast_id, "limit": 100})
-        if not data or "programs" not in data:
-            return
-
-        podcast = await self.get_podcast(prov_podcast_id)
-        for idx, program_data in enumerate(data["programs"], start=1):
-            episode = await self._parse_podcast_episode(program_data, podcast)
-            if episode:
-                yield episode
-
-    async def _parse_podcast_episode(self, program_data: dict[str, Any], podcast: Podcast) -> PodcastEpisode | None:
-        """Parse PodcastEpisode from program data."""
-        try:
-            episode_id = str(program_data["id"])
-            name = program_data.get("name", "Unknown Episode")
-            duration = program_data.get("duration", 0) // 1000
-
-            images = self._build_images([program_data.get("coverUrl")] if program_data.get("coverUrl") else None)
-
-            return PodcastEpisode(
-                item_id=episode_id,
-                provider=self.instance_id,
-                name=name,
-                duration=duration,
-                podcast=ItemMapping(
-                    item_id=podcast.item_id,
-                    provider=podcast.provider,
-                    name=podcast.name,
-                    media_type=MediaType.PODCAST,
-                    image=podcast.metadata.images[0] if podcast.metadata.images else None,
-                ),
-                provider_mappings={
-                    ProviderMapping(
-                        item_id=episode_id,
-                        provider_domain=self.domain,
-                        provider_instance=self.instance_id,
-                    )
-                },
-                metadata=MediaItemMetadata(
-                    images=images,
-                    description=program_data.get("description", ""),
-                ),
-                position=program_data.get("serialNum", 0),
-            )
-        except Exception as err:
-            _LOGGER.error("Error parsing podcast episode: %s", err)
-            return None
-
-    async def get_podcast_episode(self, prov_episode_id: str) -> PodcastEpisode:
-        """Get (full) podcast episode details by id."""
-        data = await self._request("/dj/program/detail", params={"id": prov_episode_id})
-        if not data or "program" not in data:
-            msg = f"Podcast episode {prov_episode_id} not found"
-            raise ValueError(msg)
-
-        program_data = data["program"]
-        episode_id = str(program_data["id"])
-        name = program_data.get("name", "Unknown Episode")
-        duration = program_data.get("duration", 0) // 1000
-
-        # Get podcast info
-        radio_id = str(program_data.get("radio", {}).get("id", ""))
-        podcast = await self.get_podcast(radio_id) if radio_id else None
-
-        images = self._build_images([program_data.get("coverUrl")] if program_data.get("coverUrl") else None)
-
-        return PodcastEpisode(
-            item_id=episode_id,
-            provider=self.instance_id,
-            name=name,
-            duration=duration,
-            podcast=ItemMapping(
-                item_id=podcast.item_id,
-                provider=podcast.provider,
-                name=podcast.name,
-                media_type=MediaType.PODCAST,
-                image=podcast.metadata.images[0] if podcast and podcast.metadata.images else None,
-            )
-            if podcast
-            else None,
-            provider_mappings={
-                ProviderMapping(
-                    item_id=episode_id,
-                    provider_domain=self.domain,
-                    provider_instance=self.instance_id,
-                )
-            },
-            metadata=MediaItemMetadata(
-                images=images,
-                description=program_data.get("description", ""),
-            ),
-            position=program_data.get("serialNum", 0),
-        )
-
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
-        """Get streamdetails for a track/podcast episode."""
+        """Get streamdetails for a track."""
         if media_type == MediaType.TRACK:
             # First try unblock API if configured
             if self._unblock_api_url:
@@ -940,113 +763,6 @@ class NeteaseProvider(MusicProvider):
                         can_seek=True,
                         allow_seek=True,
                     )
-        elif media_type == MediaType.PODCAST or media_type == MediaType.RADIO:
-            # For podcast episodes (dj programs), get the program detail and extract audio URL
-            data = await self._request("/dj/program/detail", params={"id": item_id})
-            if data and "program" in data:
-                program_data = data["program"]
-                # Try to get the audio URL directly from the program data
-                audio_url = program_data.get("audioUrl") or program_data.get("mainSong", {}).get("audio", {}).get("url")
-                
-                # If no audio URL found, try alternative fields that might contain the URL
-                if not audio_url:
-                    # Check for alternative fields that might contain the audio URL
-                    audio_url = (program_data.get("program", {}) or program_data).get("audioUrl")
-                    if not audio_url:
-                        # Additional fallback: check for 'shareUrl' or other possible fields
-                        audio_url = program_data.get("shareUrl")
-                
-                # If no audio URL found, try the main song ID approach as fallback
-                if not audio_url:
-                    main_song_id = program_data.get("mainSong", {}).get("id")
-                    if main_song_id:
-                        return await self.get_stream_details(str(main_song_id), MediaType.TRACK)
-                    # If mainSong ID is not available, try to get the song ID from the program data
-                    else:
-                        # Some dj programs might have the song ID in other fields
-                        program_song_id = program_data.get("song", {}).get("id") if program_data.get("song") else None
-                        if not program_song_id:
-                            # Try to get from the mainSong's id field in different format
-                            program_song_id = program_data.get("mainSongId") or program_data.get("musicId")
-                        if program_song_id:
-                            return await self.get_stream_details(str(program_song_id), MediaType.TRACK)
-                
-                if audio_url:
-                    _LOGGER.info("Using audio URL for podcast episode %s", item_id)
-                    return StreamDetails(
-                        provider=self.instance_id,
-                        item_id=item_id,
-                        audio_format=AudioFormat(
-                            content_type=ContentType.MP3,
-                            sample_rate=44100,
-                            bit_depth=16,
-                            channels=2,
-                        ),
-                        media_type=MediaType.PODCAST if media_type == MediaType.PODCAST else MediaType.RADIO,
-                        stream_type=StreamType.HTTP,
-                        path=audio_url,
-                        can_seek=True,
-                        allow_seek=True,
-                    )
-                else:
-                    _LOGGER.warning("Could not find audio URL for podcast episode %s", item_id)
-                    # Try to get audio URL using a different API endpoint that might work for podcasts
-                    # Try with the program's associated song if available
-                    if program_data.get("mainSong") and program_data["mainSong"].get("id"):
-                        main_song_id = str(program_data["mainSong"]["id"])
-                        try:
-                            return await self.get_stream_details(main_song_id, MediaType.TRACK)
-                        except ValueError:
-                            pass  # Continue to other fallback methods if this fails
-
-                    # Try alternative endpoint for getting song URL using program ID directly
-                    alt_data = await self._request("/song/url", params={"id": item_id})
-                    if alt_data and "data" in alt_data and alt_data["data"]:
-                        alt_url = alt_data["data"][0].get("url")
-                        if alt_url:
-                            _LOGGER.info("Using alternative audio URL for podcast episode %s", item_id)
-                            return StreamDetails(
-                                provider=self.instance_id,
-                                item_id=item_id,
-                                audio_format=AudioFormat(
-                                    content_type=ContentType.MP3,
-                                    sample_rate=44100,
-                                    bit_depth=16,
-                                    channels=2,
-                                ),
-                                media_type=MediaType.PODCAST if media_type == MediaType.PODCAST else MediaType.RADIO,
-                                stream_type=StreamType.HTTP,
-                                path=alt_url,
-                                can_seek=True,
-                                allow_seek=True,
-                            )
-
-                    # Final fallback: try to get audio URL from the program's radio info
-                    radio_id = program_data.get("radio", {}).get("id")
-                    if radio_id:
-                        radio_data = await self._request("/dj/detail", params={"rid": radio_id})
-                        if radio_data and "data" in radio_data and "data" in radio_data:
-                            radio_detail = radio_data["data"]
-                            # Check if the radio itself has some audio URL
-                            if "audioUrl" in radio_detail:
-                                audio_url = radio_detail["audioUrl"]
-                                if audio_url:
-                                    _LOGGER.info("Using radio audio URL for podcast episode %s", item_id)
-                                    return StreamDetails(
-                                        provider=self.instance_id,
-                                        item_id=item_id,
-                                        audio_format=AudioFormat(
-                                            content_type=ContentType.MP3,
-                                            sample_rate=44100,
-                                            bit_depth=16,
-                                            channels=2,
-                                        ),
-                                        media_type=MediaType.PODCAST if media_type == MediaType.PODCAST else MediaType.RADIO,
-                                        stream_type=StreamType.HTTP,
-                                        path=audio_url,
-                                        can_seek=True,
-                                        allow_seek=True,
-                                    )
 
         msg = f"Could not get stream URL for {item_id}"
         raise ValueError(msg)
@@ -1108,6 +824,38 @@ class NeteaseProvider(MusicProvider):
                 continue
 
         return albums
+
+    async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
+        """Get top tracks for the given artist."""
+        _LOGGER.info(f"get_artist_toptracks called for artist ID: {prov_artist_id}")
+
+        # Use /artist/top/song API to get top songs for an artist
+        data = await self._request("/artist/top/song", params={"id": prov_artist_id})
+        if not data or "songs" not in data:
+            _LOGGER.warning(f"No songs returned from artist/top/song API for artist {prov_artist_id}")
+            return []
+
+        songs = data["songs"]
+        _LOGGER.info(f"Found {len(songs)} top songs for artist {prov_artist_id}")
+
+        tracks = []
+
+        # Batch fetch track details for accurate cover images
+        track_ids = [str(song["id"]) for song in songs]
+        _LOGGER.info(f"Batch fetching details for {len(track_ids)} tracks")
+        track_details = await self._batch_fetch_track_details(track_ids)
+
+        for idx, song_data in enumerate(songs):
+            _LOGGER.debug(f"Processing top track {idx+1}: {song_data.get('name', 'Unknown')}")
+            track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
+            if track:
+                tracks.append(track)
+                _LOGGER.info(f"Successfully added top track: {track.name}")
+            else:
+                _LOGGER.warning(f"Failed to create track for top song: {song_data.get('name', 'Unknown')}")
+
+        _LOGGER.info(f"Returning {len(tracks)} top tracks for artist {prov_artist_id}")
+        return tracks
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get all tracks for a given album."""
