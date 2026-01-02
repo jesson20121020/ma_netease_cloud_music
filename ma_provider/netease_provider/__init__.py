@@ -941,12 +941,17 @@ class NeteaseProvider(MusicProvider):
                         allow_seek=True,
                     )
         elif media_type == MediaType.PODCAST or media_type == MediaType.RADIO:
-            # For podcast episodes, get the program detail and extract audio URL
+            # For podcast episodes (dj programs), get the program detail and extract audio URL
             data = await self._request("/dj/program/detail", params={"id": item_id})
             if data and "program" in data:
                 program_data = data["program"]
                 # Try to get the audio URL directly from the program data
                 audio_url = program_data.get("audioUrl") or program_data.get("mainSong", {}).get("audio", {}).get("url")
+                
+                # If no audio URL found, try alternative fields that might contain the URL
+                if not audio_url:
+                    # Check for alternative fields that might contain the audio URL
+                    audio_url = (program_data.get("program", {}) or program_data).get("audioUrl")
                 
                 # If no audio URL found, try the main song ID approach as fallback
                 if not audio_url:
@@ -961,7 +966,7 @@ class NeteaseProvider(MusicProvider):
                         item_id=item_id,
                         audio_format=AudioFormat(
                             content_type=ContentType.MP3,
-                            sample_rate=44100,
+                            sample_rate=4100,
                             bit_depth=16,
                             channels=2,
                         ),
@@ -971,6 +976,29 @@ class NeteaseProvider(MusicProvider):
                         can_seek=True,
                         allow_seek=True,
                     )
+                else:
+                    _LOGGER.warning("Could not find audio URL for podcast episode %s", item_id)
+                    # Try to get audio URL using a different API endpoint that might work for podcasts
+                    alt_data = await self._request("/song/url", params={"id": item_id})
+                    if alt_data and "data" in alt_data and alt_data["data"]:
+                        alt_url = alt_data["data"][0].get("url")
+                        if alt_url:
+                            _LOGGER.info("Using alternative audio URL for podcast episode %s", item_id)
+                            return StreamDetails(
+                                provider=self.instance_id,
+                                item_id=item_id,
+                                audio_format=AudioFormat(
+                                    content_type=ContentType.MP3,
+                                    sample_rate=44100,
+                                    bit_depth=16,
+                                    channels=2,
+                                ),
+                                media_type=MediaType.PODCAST if media_type == MediaType.PODCAST else MediaType.RADIO,
+                                stream_type=StreamType.HTTP,
+                                path=alt_url,
+                                can_seek=True,
+                                allow_seek=True,
+                            )
 
         msg = f"Could not get stream URL for {item_id}"
         raise ValueError(msg)
@@ -1349,8 +1377,8 @@ class NeteaseProvider(MusicProvider):
             is_editable=False,  # Netease playlists are typically not editable by users
         )
 
-    async def get_playlist_tracks(self, prov_playlist_id: str) -> AsyncGenerator[Track, None]:
-        """Get all playlist tracks by id."""
+    async def get_playlist_tracks(self, prov_playlist_id: str, offset: int, limit: int) -> AsyncGenerator[Track, None]:
+        """Get playlist tracks by id with offset and limit for pagination."""
         # Use /playlist/track/all to get all tracks in playlist
         data = await self._request("/playlist/track/all", params={"id": prov_playlist_id})
         if not data or "songs" not in data:
@@ -1366,12 +1394,17 @@ class NeteaseProvider(MusicProvider):
 
         _LOGGER.info(f"Found {len(songs)} songs in playlist {prov_playlist_id}")
 
+        # Apply offset and limit for pagination
+        start_index = offset
+        end_index = offset + limit
+        paginated_songs = songs[start_index:end_index]
+
         # Batch fetch track details for accurate cover images
-        track_ids = [str(song["id"]) for song in songs]
+        track_ids = [str(song["id"]) for song in paginated_songs]
         _LOGGER.info(f"Batch fetching details for {len(track_ids)} tracks")
         track_details = await self._batch_fetch_track_details(track_ids)
 
-        for idx, song_data in enumerate(songs):
+        for idx, song_data in enumerate(paginated_songs):
             _LOGGER.debug(f"Processing playlist track {idx+1}: {song_data.get('name', 'Unknown')}")
             track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
             if track:
