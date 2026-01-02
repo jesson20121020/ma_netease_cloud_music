@@ -17,6 +17,7 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.media_items import (
+    Playlist,
     Album,
     Artist,
     Audiobook,
@@ -500,7 +501,6 @@ class NeteaseProvider(MusicProvider):
     async def _parse_playlist_from_search(self, playlist_data: dict[str, Any]) -> Playlist | None:
         """Parse Playlist from search result."""
         try:
-            from music_assistant_models.media_items import Playlist
 
             playlist_id = str(playlist_data["id"])
             name = playlist_data.get("name", "Unknown Playlist")
@@ -940,17 +940,37 @@ class NeteaseProvider(MusicProvider):
                         can_seek=True,
                         allow_seek=True,
                     )
-        elif media_type == MediaType.PODCAST:
-            # For podcast episodes, we might need to get the program detail first
-            # and then extract the audio URL
-            # This is a simplified version - you may need to adjust based on actual API response
+        elif media_type == MediaType.PODCAST or media_type == MediaType.EPISODE:
+            # For podcast episodes, get the program detail and extract audio URL
             data = await self._request("/dj/program/detail", params={"id": item_id})
             if data and "program" in data:
                 program_data = data["program"]
-                # Try to get the main song URL if available
-                main_song_id = program_data.get("mainSong", {}).get("id")
-                if main_song_id:
-                    return await self.get_stream_details(str(main_song_id), MediaType.TRACK)
+                # Try to get the audio URL directly from the program data
+                audio_url = program_data.get("audioUrl") or program_data.get("mainSong", {}).get("audio", {}).get("url")
+                
+                # If no audio URL found, try the main song ID approach as fallback
+                if not audio_url:
+                    main_song_id = program_data.get("mainSong", {}).get("id")
+                    if main_song_id:
+                        return await self.get_stream_details(str(main_song_id), MediaType.TRACK)
+                
+                if audio_url:
+                    _LOGGER.info("Using audio URL for podcast episode %s", item_id)
+                    return StreamDetails(
+                        provider=self.instance_id,
+                        item_id=item_id,
+                        audio_format=AudioFormat(
+                            content_type=ContentType.MP3,
+                            sample_rate=44100,
+                            bit_depth=16,
+                            channels=2,
+                        ),
+                        media_type=MediaType.PODCAST if media_type == MediaType.PODCAST else MediaType.EPISODE,
+                        stream_type=StreamType.HTTP,
+                        path=audio_url,
+                        can_seek=True,
+                        allow_seek=True,
+                    )
 
         msg = f"Could not get stream URL for {item_id}"
         raise ValueError(msg)
