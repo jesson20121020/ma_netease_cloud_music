@@ -340,20 +340,25 @@ class NeteaseProvider(MusicProvider):
                 for artist_data in song_data["artists"]:
                     artist_id = str(artist_data["id"])
                     artist_name = artist_data.get("name", "Unknown Artist")
-                    artists.append(
-                        Artist(
-                            item_id=artist_id,
-                            provider=self.instance_id,
-                            name=artist_name,
-                            provider_mappings={
-                                ProviderMapping(
-                                    item_id=artist_id,
-                                    provider_domain=self.domain,
-                                    provider_instance=self.instance_id,
-                                )
-                            },
-                        )
+                    # Create artist with proper provider mapping and basic metadata
+                    artist = Artist(
+                        item_id=artist_id,
+                        provider=self.instance_id,
+                        name=artist_name,
+                        provider_mappings={
+                            ProviderMapping(
+                                item_id=artist_id,
+                                provider_domain=self.domain,
+                                provider_instance=self.instance_id,
+                            )
+                        },
                     )
+                    # Add basic metadata if available in the artist data
+                    if "img1v1Url" in artist_data or "picUrl" in artist_data:
+                        artist_img_url = artist_data.get("img1v1Url") or artist_data.get("picUrl")
+                        artist.metadata = MediaItemMetadata()
+                        artist.metadata.images = self._build_images([artist_img_url] if artist_img_url else None)
+                    artists.append(artist)
 
             # Parse album
             album: Album | ItemMapping | None = None
@@ -621,6 +626,11 @@ class NeteaseProvider(MusicProvider):
 
         track_lyrics = await self.get_lyrics(prov_track_id)
 
+        # Create metadata with both images and lyrics if available
+        metadata = MediaItemMetadata(images=images)
+        if track_lyrics:
+            metadata.lyrics = track_lyrics
+
         return Track(
             item_id=song_id,
             provider=self.instance_id,
@@ -635,7 +645,7 @@ class NeteaseProvider(MusicProvider):
                     provider_instance=self.instance_id,
                 )
             },
-            metadata=MediaItemMetadata(images=images, lyrics=track_lyrics),
+            metadata=metadata,
             disc_number=song_data.get("cd", 1),
             track_number=song_data.get("no", 1),
         )
