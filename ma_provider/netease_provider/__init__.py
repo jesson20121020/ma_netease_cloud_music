@@ -1017,124 +1017,39 @@ class NeteaseProvider(MusicProvider):
 
         _LOGGER.info(f"Total yielded {count} tracks from get_library_tracks")
 
-    async def get_library_podcasts(self) -> AsyncGenerator[Podcast, None]:
-        """Retrieve library podcasts from the provider."""
-        _LOGGER.info("get_library_podcasts called - returning popular podcasts/radio as library")
+    async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
+        """Retrieve library/subscribed playlists from the provider."""
+        _LOGGER.info("get_library_playlists called - returning popular playlists as library")
 
-        # For streaming provider, return popular radio/podcasts as library
-        _LOGGER.info("Requesting hot radios from API: /dj/hot with limit=20")
-        data = await self._request("/dj/hot", params={"limit": 20, "offset": 0})
+        # For streaming provider, return popular playlists as library
+        # Use /top/playlist API to get the top/hot playlists
+        _LOGGER.info("Requesting top playlists from API: /top/playlist with limit=50")
+        data = await self._request("/top/playlist/highquality", params={"limit": 50, "offset": 0, "cat": "全部"})
 
-        if not data or "djRadios" not in data:
-            _LOGGER.warning("No djRadios data returned from /dj/hot API")
+        if not data or "playlists" not in data:
+            _LOGGER.warning("No playlists data returned from /top/playlist API")
             return
 
-        radios_list = data["djRadios"]
-        _LOGGER.info(f"Received {len(radios_list)} radios from API")
+        playlists_list = data["playlists"]
+        _LOGGER.info(f"Received {len(playlists_list)} playlists from API")
 
         count = 0
-        for radio_data in radios_list[:20]:  # Limit to 20
-            radio_name = radio_data.get("name", "Unknown Radio")
-            radio_id = str(radio_data.get("id", ""))
+        for playlist_data in playlists_list:
+            playlist_name = playlist_data.get("name", "Unknown Playlist")
+            playlist_id = str(playlist_data.get("id", ""))
 
-            _LOGGER.debug(f"Processing radio: {radio_name} (ID: {radio_id})")
+            _LOGGER.debug(f"Processing playlist: {playlist_name} (ID: {playlist_id})")
 
-            # Parse podcast/radio
-            podcast = await self._parse_podcast_from_search(radio_data)
-            if podcast:
+            # Parse playlist
+            playlist = await self._parse_playlist_from_search(playlist_data)
+            if playlist:
                 count += 1
-                _LOGGER.debug(f"Successfully yielded podcast {count}: {podcast.name}")
-                yield podcast
+                _LOGGER.debug(f"Successfully yielded playlist {count}: {playlist.name}")
+                yield playlist
             else:
-                _LOGGER.warning(f"Failed to parse radio: {radio_name}")
+                _LOGGER.warning(f"Failed to parse playlist: {playlist_name}")
 
-        _LOGGER.info(f"Total yielded {count} podcasts from get_library_podcasts")
-
-    async def get_library_audiobooks(self) -> AsyncGenerator[Audiobook, None]:
-        """Retrieve library audiobooks from the provider."""
-        _LOGGER.info("get_library_audiobooks called - returning popular audiobooks/radio as library")
-
-        # For streaming provider, return popular radio/audiobooks as library
-        # We'll use the same radio API as podcasts but treat them as audiobooks
-        _LOGGER.info("Requesting hot radios from API: /dj/hot with limit=15")
-        data = await self._request("/dj/hot", params={"limit": 15, "offset": 0})
-
-        if not data or "djRadios" not in data:
-            _LOGGER.warning("No djRadios data returned from /dj/hot API")
-            return
-
-        radios_list = data["djRadios"]
-        _LOGGER.info(f"Received {len(radios_list)} radios from API")
-
-        count = 0
-        for radio_data in radios_list[:15]:  # Limit to 15
-            radio_name = radio_data.get("name", "Unknown Radio")
-            radio_id = str(radio_data.get("id", ""))
-
-            _LOGGER.debug(f"Processing radio as audiobook: {radio_name} (ID: {radio_id})")
-
-            # Parse audiobook/radio - reuse podcast parsing logic but create Audiobook objects
-            try:
-                audiobook = Audiobook(
-                    item_id=radio_id,
-                    provider=self.instance_id,
-                    name=radio_name,
-                    provider_mappings={
-                        ProviderMapping(
-                            item_id=radio_id,
-                            provider_domain=self.domain,
-                            provider_instance=self.instance_id,
-                        )
-                    },
-                    metadata=MediaItemMetadata(
-                        images=self._build_images([radio_data.get("picUrl")] if radio_data.get("picUrl") else None),
-                        description=radio_data.get("desc", ""),
-                    ),
-                    publisher=radio_data.get("dj", {}).get("nickname", "Unknown Publisher"),
-                    authors=UniqueList([radio_data.get("dj", {}).get("nickname", "Unknown Author")]),
-                    duration=0,  # Will be calculated from episodes if available
-                )
-
-                count += 1
-                _LOGGER.debug(f"Successfully yielded audiobook {count}: {audiobook.name}")
-                yield audiobook
-            except Exception as err:
-                _LOGGER.warning(f"Failed to parse radio as audiobook: {radio_name}, error: {err}")
-
-        _LOGGER.info(f"Total yielded {count} audiobooks from get_library_audiobooks")
-
-    async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
-        """Retrieve library radios from the provider."""
-        _LOGGER.info("get_library_radios called - returning recommended radio programs")
-
-        # Use /program/recommend API to get recommended radio programs
-        _LOGGER.info("Requesting recommended radio programs from API: /program/recommend")
-        data = await self._request("/program/recommend", params={})
-
-        if not data or "programs" not in data:
-            _LOGGER.warning("No programs data returned from /program/recommend API")
-            return
-
-        programs_list = data["programs"]
-        _LOGGER.info(f"Received {len(programs_list)} recommended radio programs from API")
-
-        count = 0
-        for program_data in programs_list:
-            program_name = program_data.get("name", "Unknown Radio Program")
-            program_id = str(program_data.get("id", ""))
-
-            _LOGGER.debug(f"Processing radio program: {program_name} (ID: {program_id})")
-
-            # Parse radio program
-            radio = await self._parse_radio_from_search(program_data)
-            if radio:
-                count += 1
-                _LOGGER.debug(f"Successfully yielded radio {count}: {radio.name}")
-                yield radio
-            else:
-                _LOGGER.warning(f"Failed to parse radio program: {program_name}")
-
-        _LOGGER.info(f"Total yielded {count} radio programs from get_library_radios")
+        _LOGGER.info(f"Total yielded {count} playlists from get_library_playlists")
 
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
         """Get full playlist details by id."""
