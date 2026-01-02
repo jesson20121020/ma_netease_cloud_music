@@ -68,7 +68,6 @@ SUPPORTED_FEATURES = {
     ProviderFeature.LIBRARY_PODCASTS,
     ProviderFeature.LIBRARY_AUDIOBOOKS,
     ProviderFeature.ARTIST_ALBUMS,
-    ProviderFeature.PLAYLIST_TRACKS,
 }
 
 
