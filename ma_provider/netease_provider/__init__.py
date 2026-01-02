@@ -334,10 +334,13 @@ class NeteaseProvider(MusicProvider):
             name = song_data.get("name", "Unknown")
             duration = song_data.get("dt", 0) // 1000  # Convert from milliseconds
 
-            # Parse artists
+            # Parse artists - prefer detail_data if available (has more complete info)
             artists = UniqueList[Artist]()
-            if "artists" in song_data:
-                for artist_data in song_data["artists"]:
+            artist_source = detail_data if detail_data else song_data
+            artist_key = "ar" if detail_data else "artists"
+
+            if artist_key in artist_source:
+                for artist_data in artist_source[artist_key]:
                     artist_id = str(artist_data["id"])
                     artist_name = artist_data.get("name", "Unknown Artist")
                     # Create artist with proper provider mapping and basic metadata
@@ -360,11 +363,14 @@ class NeteaseProvider(MusicProvider):
                         artist.metadata.images = self._build_images([artist_img_url] if artist_img_url else None)
                     artists.append(artist)
 
-            # Parse album
+            # Parse album - prefer detail_data if available (has more complete info)
             album: Album | ItemMapping | None = None
             album_cover_url: str | None = None
-            if "album" in song_data:
-                album_data = song_data["album"]
+            album_source = detail_data if detail_data else song_data
+            album_key = "al" if detail_data else "album"
+
+            if album_key in album_source:
+                album_data = album_source[album_key]
                 album_id = str(album_data["id"])
                 album_name = album_data.get("name", "Unknown Album")
                 album_cover_url = album_data.get("picUrl")
