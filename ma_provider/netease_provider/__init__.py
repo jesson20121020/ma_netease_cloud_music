@@ -68,6 +68,7 @@ SUPPORTED_FEATURES = {
     ProviderFeature.LIBRARY_PODCASTS,
     ProviderFeature.LIBRARY_AUDIOBOOKS,
     ProviderFeature.ARTIST_ALBUMS,
+    ProviderFeature.PLAYLIST_TRACKS,
 }
 
 
@@ -1348,6 +1349,37 @@ class NeteaseProvider(MusicProvider):
             owner=owner,
             is_editable=False,  # Netease playlists are typically not editable by users
         )
+
+    async def get_playlist_tracks(self, prov_playlist_id: str) -> AsyncGenerator[Track, None]:
+        """Get all playlist tracks by id."""
+        # Use /playlist/track/all to get all tracks in playlist
+        data = await self._request("/playlist/track/all", params={"id": prov_playlist_id})
+        if not data or "songs" not in data:
+            # Alternative API endpoint might be needed
+            _LOGGER.warning(f"No songs returned from playlist/track/all for playlist {prov_playlist_id}")
+            # Try using playlist detail endpoint which might include tracks
+            detail_data = await self._request("/playlist/detail", params={"id": prov_playlist_id, "limit": 1000})
+            if not detail_data or "playlist" not in detail_data:
+                return
+            songs = detail_data["playlist"].get("tracks", [])
+        else:
+            songs = data["songs"]
+
+        _LOGGER.info(f"Found {len(songs)} songs in playlist {prov_playlist_id}")
+
+        # Batch fetch track details for accurate cover images
+        track_ids = [str(song["id"]) for song in songs]
+        _LOGGER.info(f"Batch fetching details for {len(track_ids)} tracks")
+        track_details = await self._batch_fetch_track_details(track_ids)
+
+        for idx, song_data in enumerate(songs):
+            _LOGGER.debug(f"Processing playlist track {idx+1}: {song_data.get('name', 'Unknown')}")
+            track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
+            if track:
+                _LOGGER.debug(f"Yielding playlist track: {track.name}")
+                yield track
+            else:
+                _LOGGER.warning(f"Failed to parse playlist track: {song_data.get('name', 'Unknown')}")
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
         """Get full radio details by id."""
