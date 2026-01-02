@@ -952,12 +952,24 @@ class NeteaseProvider(MusicProvider):
                 if not audio_url:
                     # Check for alternative fields that might contain the audio URL
                     audio_url = (program_data.get("program", {}) or program_data).get("audioUrl")
+                    if not audio_url:
+                        # Additional fallback: check for 'shareUrl' or other possible fields
+                        audio_url = program_data.get("shareUrl")
                 
                 # If no audio URL found, try the main song ID approach as fallback
                 if not audio_url:
                     main_song_id = program_data.get("mainSong", {}).get("id")
                     if main_song_id:
                         return await self.get_stream_details(str(main_song_id), MediaType.TRACK)
+                    # If mainSong ID is not available, try to get the song ID from the program data
+                    else:
+                        # Some dj programs might have the song ID in other fields
+                        program_song_id = program_data.get("song", {}).get("id") if program_data.get("song") else None
+                        if not program_song_id:
+                            # Try to get from the mainSong's id field in different format
+                            program_song_id = program_data.get("mainSongId") or program_data.get("musicId")
+                        if program_song_id:
+                            return await self.get_stream_details(str(program_song_id), MediaType.TRACK)
                 
                 if audio_url:
                     _LOGGER.info("Using audio URL for podcast episode %s", item_id)
@@ -966,7 +978,7 @@ class NeteaseProvider(MusicProvider):
                         item_id=item_id,
                         audio_format=AudioFormat(
                             content_type=ContentType.MP3,
-                            sample_rate=4100,
+                            sample_rate=44100,
                             bit_depth=16,
                             channels=2,
                         ),
@@ -979,6 +991,15 @@ class NeteaseProvider(MusicProvider):
                 else:
                     _LOGGER.warning("Could not find audio URL for podcast episode %s", item_id)
                     # Try to get audio URL using a different API endpoint that might work for podcasts
+                    # Try with the program's associated song if available
+                    if program_data.get("mainSong") and program_data["mainSong"].get("id"):
+                        main_song_id = str(program_data["mainSong"]["id"])
+                        try:
+                            return await self.get_stream_details(main_song_id, MediaType.TRACK)
+                        except ValueError:
+                            pass  # Continue to other fallback methods if this fails
+
+                    # Try alternative endpoint for getting song URL using program ID directly
                     alt_data = await self._request("/song/url", params={"id": item_id})
                     if alt_data and "data" in alt_data and alt_data["data"]:
                         alt_url = alt_data["data"][0].get("url")
@@ -999,6 +1020,33 @@ class NeteaseProvider(MusicProvider):
                                 can_seek=True,
                                 allow_seek=True,
                             )
+
+                    # Final fallback: try to get audio URL from the program's radio info
+                    radio_id = program_data.get("radio", {}).get("id")
+                    if radio_id:
+                        radio_data = await self._request("/dj/detail", params={"rid": radio_id})
+                        if radio_data and "data" in radio_data and "data" in radio_data:
+                            radio_detail = radio_data["data"]
+                            # Check if the radio itself has some audio URL
+                            if "audioUrl" in radio_detail:
+                                audio_url = radio_detail["audioUrl"]
+                                if audio_url:
+                                    _LOGGER.info("Using radio audio URL for podcast episode %s", item_id)
+                                    return StreamDetails(
+                                        provider=self.instance_id,
+                                        item_id=item_id,
+                                        audio_format=AudioFormat(
+                                            content_type=ContentType.MP3,
+                                            sample_rate=44100,
+                                            bit_depth=16,
+                                            channels=2,
+                                        ),
+                                        media_type=MediaType.PODCAST if media_type == MediaType.PODCAST else MediaType.RADIO,
+                                        stream_type=StreamType.HTTP,
+                                        path=audio_url,
+                                        can_seek=True,
+                                        allow_seek=True,
+                                    )
 
         msg = f"Could not get stream URL for {item_id}"
         raise ValueError(msg)
