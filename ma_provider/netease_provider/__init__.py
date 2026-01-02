@@ -332,7 +332,7 @@ class NeteaseProvider(MusicProvider):
         try:
             song_id = str(song_data["id"])
             name = song_data.get("name", "Unknown")
-            duration = song_data.get("duration", 0) // 1000  # Convert from milliseconds
+            duration = song_data.get("dt", 0) // 1000  # Convert from milliseconds
 
             # Parse artists
             artists = UniqueList[Artist]()
