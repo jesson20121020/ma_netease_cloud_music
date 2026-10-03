@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncGenerator
@@ -9,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from music_assistant_models.config_entries import ConfigEntry
+from music_assistant_models.errors import MediaNotFoundError, ResourceTemporarilyUnavailable
 from music_assistant_models.enums import (
     ConfigEntryType,
     ContentType,
@@ -51,14 +53,24 @@ _LOGGER = logging.getLogger(__name__)
 
 CONF_KEY_API_URL = "api_url"
 CONF_KEY_UNBLOCK_API_URL = "unblock_api_url"
+CONF_KEY_COOKIE = "cookie"
 
 # address a NeteaseCloudMusicApi backend listens on by default
 DEFAULT_API_URL = "http://localhost:3000"
 
 # The Netease upstream throttles us ("操作频繁，请稍候再试", HTTP 405) when Music Assistant
-# refreshes a large library, which issues a search per item. Pause our own requests for a
-# moment after such an answer instead of hammering the backend with the whole refresh.
-RATE_LIMIT_BACKOFF = 20.0
+# refreshes a large library, which issues a search per item. An anonymous Netease session
+# (the NeteaseCloudMusicApi default) has a very small quota, so:
+#   * never issue two requests back to back (REQUEST_MIN_INTERVAL),
+#   * after a throttled answer pause ALL requests for an exponentially growing time
+#     (RATE_LIMIT_BACKOFF, capped at RATE_LIMIT_BACKOFF_MAX),
+#   * retry the throttled request itself up to RATE_LIMIT_RETRIES times, and only then
+#     report a temporary failure instead of pretending the item does not exist.
+RATE_LIMIT_BACKOFF = 15.0
+RATE_LIMIT_BACKOFF_MAX = 120.0
+RATE_LIMIT_RETRIES = 2
+REQUEST_MIN_INTERVAL = 0.35
+RATE_LIMIT_STATUS_CODES = (405, 429)
 
 # NeteaseCloudMusicApi search types
 # 1: 单曲, 10: 专辑, 100: 歌手, 1000: 歌单, 1009: 电台, 1014: 视频
@@ -129,6 +141,14 @@ async def get_config_entries(
             default_value="",
             required=False,
         ),
+        ConfigEntry(
+            key=CONF_KEY_COOKIE,
+            type=ConfigEntryType.SECURE_STRING,
+            label="登录 Cookie（可选）",
+            description="登录后的 cookie，可显著提高接口配额（避免 405 操作频繁）并访问账号歌单；留空使用匿名会话",
+            default_value="",
+            required=False,
+        ),
     )
 
 
@@ -137,8 +157,12 @@ class NeteaseProvider(MusicProvider):
 
     _api_url: str
     _unblock_api_url: str | None
+    _cookie: str | None
     _http_client: httpx.AsyncClient
     _rate_limited_until: float
+    _rate_limit_strikes: int
+    _last_request_at: float
+    _request_lock: asyncio.Lock
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """
@@ -165,6 +189,13 @@ class NeteaseProvider(MusicProvider):
                 required=False,
                 hidden=True,
             ),
+            ConfigEntry(
+                key=CONF_KEY_COOKIE,
+                type=ConfigEntryType.SECURE_STRING,
+                default_value="",
+                required=False,
+                hidden=True,
+            ),
         )
 
     async def handle_async_init(self) -> None:
@@ -184,13 +215,25 @@ class NeteaseProvider(MusicProvider):
         else:
             self._unblock_api_url = None
 
+        # Optional login cookie: an authenticated Netease session has a much higher quota
+        # than the anonymous one that NeteaseCloudMusicApi starts with.
+        cookie = self.get_setup_value(CONF_KEY_COOKIE)
+        self._cookie = cookie.strip() if isinstance(cookie, str) and cookie.strip() else None
+
         # Keep a private httpx client: this provider's request helpers are written against
         # httpx, while Music Assistant's shared session is an aiohttp ClientSession (there
         # ``json()`` is a coroutine and the error types differ). Closed again in unload().
         self._http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
         self._rate_limited_until = 0.0
-        _LOGGER.info("Netease Provider initialized with API URL: %s, Unblock API URL: %s",
-                    self._api_url, self._unblock_api_url)
+        self._rate_limit_strikes = 0
+        self._last_request_at = 0.0
+        self._request_lock = asyncio.Lock()
+        _LOGGER.info(
+            "Netease Provider initialized with API URL: %s, Unblock API URL: %s, login cookie: %s",
+            self._api_url,
+            self._unblock_api_url,
+            "yes" if self._cookie else "no (anonymous session, lower rate limit)",
+        )
 
     async def unload(self, is_removed: bool = False) -> None:
         """
@@ -222,44 +265,92 @@ class NeteaseProvider(MusicProvider):
         return True
 
     async def _request(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
-        """Make a request to NeteaseCloudMusicApi."""
+        """
+        Make a request to NeteaseCloudMusicApi.
+
+        Requests are serialized and rate limited so a burst - Music Assistant refreshes a
+        library by searching per item - does not make the Netease upstream answer
+        "操作频繁，请稍候再试" (HTTP 405). A throttled request waits out the pause and is
+        retried; when it is still throttled afterwards this raises
+        ResourceTemporarilyUnavailable so callers (and Music Assistant) treat it as a
+        temporary provider problem instead of reporting the item as not found.
+        """
         url = f"{self._api_url}{endpoint}"
-        now = time.monotonic()
-        if now < self._rate_limited_until:
-            _LOGGER.debug(
-                "Skipping request to %s: Netease rate limit active for another %.0fs",
-                url,
-                self._rate_limited_until - now,
-            )
-            return None
-        try:
-            response = await self._http_client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
+        payload = dict(params) if params else {}
+        if self._cookie:
+            # NeteaseCloudMusicApi accepts the session cookie as a request parameter
+            payload["cookie"] = self._cookie
+
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            async with self._request_lock:
+                await self._wait_for_slot()
+                try:
+                    response = await self._http_client.get(url, params=payload)
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as err:
+                    if err.response.status_code not in RATE_LIMIT_STATUS_CODES:
+                        _LOGGER.error("HTTP error while requesting %s: %s", url, err)
+                        return None
+                    throttled = True
+                except httpx.HTTPError as err:
+                    _LOGGER.error("HTTP error while requesting %s: %s", url, err)
+                    return None
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.error("Unexpected error while requesting %s: %s", url, err)
+                    return None
+                else:
+                    throttled = False
+
+            if throttled:
+                self._note_rate_limit(url)
+                if attempt < RATE_LIMIT_RETRIES:
+                    continue
+                msg = f"Netease API rate limit reached for {url}"
+                raise ResourceTemporarilyUnavailable(
+                    msg,
+                    backoff_time=max(int(self._rate_limited_until - time.monotonic()), 1),
+                )
+
+            # a request went through: the backend is answering again, so forget old strikes
+            self._rate_limit_strikes = 0
+            try:
+                data = response.json()
+            except ValueError as err:
+                _LOGGER.error("Invalid JSON in response from %s: %s", url, err)
+                return None
             if data.get("code") != 200:
-                _LOGGER.warning("API returned error code %s: %s", data.get("code"), data.get("message"))
+                _LOGGER.warning(
+                    "API returned error code %s: %s", data.get("code"), data.get("message")
+                )
                 return None
             return data
-        except httpx.HTTPStatusError as err:
-            if err.response.status_code in (405, 429):
-                self._note_rate_limit(url)
-            else:
-                _LOGGER.error("HTTP error while requesting %s: %s", url, err)
-            return None
-        except httpx.HTTPError as err:
-            _LOGGER.error("HTTP error while requesting %s: %s", url, err)
-            return None
-        except Exception as err:
-            _LOGGER.error("Unexpected error while requesting %s: %s", url, err)
-            return None
+
+    async def _wait_for_slot(self) -> None:
+        """Sleep until it is allowed to send the next request (rate limit + spacing)."""
+        while True:
+            now = time.monotonic()
+            # honor an active rate limit pause, but never send two requests back to back
+            delay = max(
+                self._rate_limited_until - now,
+                REQUEST_MIN_INTERVAL - (now - self._last_request_at),
+            )
+            if delay <= 0:
+                self._last_request_at = time.monotonic()
+                return
+            await asyncio.sleep(delay)
 
     def _note_rate_limit(self, url: str) -> None:
         """Back off for a while after the Netease backend reported that we are too fast."""
-        self._rate_limited_until = time.monotonic() + RATE_LIMIT_BACKOFF
+        self._rate_limit_strikes += 1
+        backoff = min(
+            RATE_LIMIT_BACKOFF * (2 ** (self._rate_limit_strikes - 1)),
+            RATE_LIMIT_BACKOFF_MAX,
+        )
+        self._rate_limited_until = time.monotonic() + backoff
         _LOGGER.warning(
             "Netease API rate limit reached (%s): pausing requests for %ds",
             url,
-            int(RATE_LIMIT_BACKOFF),
+            int(backoff),
         )
 
     async def _request_unblock_api(self, song_id: str) -> dict[str, Any] | None:
@@ -696,7 +787,7 @@ class NeteaseProvider(MusicProvider):
         data = await self._request("/song/detail", params={"ids": prov_track_id})
         if not data or "songs" not in data or not data["songs"]:
             msg = f"Track {prov_track_id} not found"
-            raise ValueError(msg)
+            raise MediaNotFoundError(msg)
 
         song_data = data["songs"][0]
         song_id = str(song_data["id"])
@@ -756,7 +847,7 @@ class NeteaseProvider(MusicProvider):
         data = await self._request("/artist/detail", params={"id": prov_artist_id})
         if not data or "data" not in data:
             msg = f"Artist {prov_artist_id} not found"
-            raise ValueError(msg)
+            raise MediaNotFoundError(msg)
 
         artist_data = data["data"]["artist"]
         artist_id = str(artist_data["id"])
@@ -792,7 +883,7 @@ class NeteaseProvider(MusicProvider):
         data = await self._request("/album", params={"id": prov_album_id})
         if not data or "album" not in data:
             msg = f"Album {prov_album_id} not found"
-            raise ValueError(msg)
+            raise MediaNotFoundError(msg)
 
         album_data = data["album"]
         album_id = str(album_data["id"])
@@ -1172,7 +1263,7 @@ class NeteaseProvider(MusicProvider):
         data = await self._request("/playlist/detail", params={"id": prov_playlist_id})
         if not data or "playlist" not in data:
             msg = f"Playlist {prov_playlist_id} not found"
-            raise ValueError(msg)
+            raise MediaNotFoundError(msg)
 
         playlist_data = data["playlist"]
         playlist_id = str(playlist_data["id"])
@@ -1248,7 +1339,7 @@ class NeteaseProvider(MusicProvider):
         data = await self._request("/dj/program/detail", params={"id": prov_radio_id})
         if not data or "program" not in data:
             msg = f"Radio program {prov_radio_id} not found"
-            raise ValueError(msg)
+            raise MediaNotFoundError(msg)
 
         program_data = data["program"]
         program_id = str(program_data["id"])

@@ -95,6 +95,7 @@ docker run -d \
 在 MusicAssistant 的「设置 → 提供商 → 添加提供商」中选择 **Netease Cloud provider**，添加向导会要求填写：
 - **API 地址**（必填）: `http://localhost:3000`
 - **解锁 API 地址**（可选）: `http://localhost:3001`
+- **登录 Cookie**（可选，推荐）: 登录网易云后的 cookie，可大幅提高接口配额（避免「操作频繁」405）并访问自己账号的歌单
 
 向导会立即探测地址是否为可用的 NeteaseCloudMusicApi 服务，填错会提示重新输入；之后修改地址请使用提供商的「重新配置」。
 
@@ -155,8 +156,19 @@ curl http://localhost:3000/login/status
 
 **搜索不到任何歌曲 / 日志出现 HTTP 405**
 - 日志形如 `Unexpected error while requesting http://.../search: 405, message='Method Not Allowed'`，网易云 API 容器日志里是 `{ msg: '操作频繁，请稍候再试', code: 405 }`：这是网易对旧版 `/search` 接口的限流（大量刷新媒体库时最容易触发），而不是配置错误
-- Provider 使用 `/cloudsearch` 搜索并内置了 20 秒退避，请更新到本仓库最新代码；旧代码调用 `/search`，一旦被限流就会一直搜不到
+- Provider 使用 `/cloudsearch` 搜索，串行化请求并内置退避（首次 15 秒、逐次翻倍、上限 120 秒）与自动重试，请更新到本仓库最新代码；旧代码调用 `/search`，一旦被限流就会一直搜不到
 - 若日志出现 `'coroutine' object has no attribute 'get'` 或 `RuntimeWarning: coroutine 'MassClientResponse.json' was never awaited`，说明 Provider 把 MusicAssistant 的 aiohttp 会话当成 httpx 使用，同样更新到最新代码即可
+- 若日志出现 `Netease API rate limit reached (...): pausing requests for Ns`：这是 Provider 正在自动退避，通常无需干预；频繁出现说明当前是**匿名会话**（配额很低），登录后填入 cookie 即可解决
+
+**频繁限流（操作频繁）—— 登录后填入 cookie**
+```bash
+# 1) 手机号+密码登录，返回 JSON 里带一个很长的 cookie 字段
+curl -X POST "http://192.168.31.1:3001/login/cellphone?phone=手机号&password=密码"
+# 2) 把返回 JSON 里的 cookie 值填到 Provider 的「登录 Cookie（可选，推荐）」里（重新配置流程）
+# 3) 验证：data.account 存在且 anonimousUser 不为 true 即表示已登录
+curl "http://192.168.31.1:3001/login/status?cookie=粘贴的cookie"
+```
+登录后可显著提高接口配额（避免 405 操作频繁），并能访问自己账号的歌单；留空则使用匿名会话，配额较低。
 
 ## 📚 相关链接
 
