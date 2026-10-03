@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +55,11 @@ CONF_KEY_UNBLOCK_API_URL = "unblock_api_url"
 # address a NeteaseCloudMusicApi backend listens on by default
 DEFAULT_API_URL = "http://localhost:3000"
 
+# The Netease upstream throttles us ("操作频繁，请稍候再试", HTTP 405) when Music Assistant
+# refreshes a large library, which issues a search per item. Pause our own requests for a
+# moment after such an answer instead of hammering the backend with the whole refresh.
+RATE_LIMIT_BACKOFF = 20.0
+
 # NeteaseCloudMusicApi search types
 # 1: 单曲, 10: 专辑, 100: 歌手, 1000: 歌单, 1009: 电台, 1014: 视频
 NETEASE_SEARCH_TYPE_SONG = 1
@@ -61,6 +67,11 @@ NETEASE_SEARCH_TYPE_ALBUM = 10
 NETEASE_SEARCH_TYPE_ARTIST = 100
 NETEASE_SEARCH_TYPE_PLAYLIST = 1000
 NETEASE_SEARCH_TYPE_RADIO = 1009
+
+# Netease blocks the legacy /search interface for a while after a burst of requests
+# ("操作频繁，请稍候再试", HTTP 405) while /cloudsearch keeps answering. /cloudsearch returns
+# the exact same `result.songs|albums|artists|playlists` payload, so use it for searching.
+NETEASE_SEARCH_ENDPOINT = "/cloudsearch"
 
 SUPPORTED_FEATURES = {
     ProviderFeature.SEARCH,
@@ -127,6 +138,7 @@ class NeteaseProvider(MusicProvider):
     _api_url: str
     _unblock_api_url: str | None
     _http_client: httpx.AsyncClient
+    _rate_limited_until: float
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """
@@ -172,19 +184,37 @@ class NeteaseProvider(MusicProvider):
         else:
             self._unblock_api_url = None
 
-        # the server owns this session: using it avoids a private connection pool that
-        # would have to be torn down again when the provider unloads
-        self._http_client = self.mass.http_session
+        # Keep a private httpx client: this provider's request helpers are written against
+        # httpx, while Music Assistant's shared session is an aiohttp ClientSession (there
+        # ``json()`` is a coroutine and the error types differ). Closed again in unload().
+        self._http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+        self._rate_limited_until = 0.0
         _LOGGER.info("Netease Provider initialized with API URL: %s, Unblock API URL: %s",
                     self._api_url, self._unblock_api_url)
 
+    async def unload(self, is_removed: bool = False) -> None:
+        """
+        Handle unload/removal of the provider.
+
+        :param is_removed: Whether the provider is removed from the configuration.
+        """
+        await self._close_http_client()
+        await super().unload(is_removed)
+
     async def close(self) -> None:
         """
-        Cleanup hook.
+        Close the provider.
 
-        Kept for older Music Assistant versions that call it: the HTTP session belongs to
-        the server, so there is nothing of our own to release here.
+        Kept for older Music Assistant versions that call ``close()`` instead of
+        ``unload()``; both paths close the HTTP client exactly once.
         """
+        await self._close_http_client()
+
+    async def _close_http_client(self) -> None:
+        """Close the provider's HTTP client when it is still open."""
+        client = getattr(self, "_http_client", None)
+        if client is not None and not client.is_closed:
+            await client.aclose()
 
     @property
     def is_streaming_provider(self) -> bool:
@@ -194,6 +224,14 @@ class NeteaseProvider(MusicProvider):
     async def _request(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
         """Make a request to NeteaseCloudMusicApi."""
         url = f"{self._api_url}{endpoint}"
+        now = time.monotonic()
+        if now < self._rate_limited_until:
+            _LOGGER.debug(
+                "Skipping request to %s: Netease rate limit active for another %.0fs",
+                url,
+                self._rate_limited_until - now,
+            )
+            return None
         try:
             response = await self._http_client.get(url, params=params)
             response.raise_for_status()
@@ -202,12 +240,27 @@ class NeteaseProvider(MusicProvider):
                 _LOGGER.warning("API returned error code %s: %s", data.get("code"), data.get("message"))
                 return None
             return data
+        except httpx.HTTPStatusError as err:
+            if err.response.status_code in (405, 429):
+                self._note_rate_limit(url)
+            else:
+                _LOGGER.error("HTTP error while requesting %s: %s", url, err)
+            return None
         except httpx.HTTPError as err:
             _LOGGER.error("HTTP error while requesting %s: %s", url, err)
             return None
         except Exception as err:
             _LOGGER.error("Unexpected error while requesting %s: %s", url, err)
             return None
+
+    def _note_rate_limit(self, url: str) -> None:
+        """Back off for a while after the Netease backend reported that we are too fast."""
+        self._rate_limited_until = time.monotonic() + RATE_LIMIT_BACKOFF
+        _LOGGER.warning(
+            "Netease API rate limit reached (%s): pausing requests for %ds",
+            url,
+            int(RATE_LIMIT_BACKOFF),
+        )
 
     async def _request_unblock_api(self, song_id: str) -> dict[str, Any] | None:
         """Request unblock API to get alternative audio sources."""
@@ -288,7 +341,7 @@ class NeteaseProvider(MusicProvider):
         if MediaType.TRACK in media_types:
             try:
                 data = await self._request(
-                    "/search",
+                    NETEASE_SEARCH_ENDPOINT,
                     params={"keywords": search_query, "type": NETEASE_SEARCH_TYPE_SONG, "limit": limit},
                 )
                 if data and "result" in data and "songs" in data["result"]:
@@ -306,7 +359,7 @@ class NeteaseProvider(MusicProvider):
         if MediaType.ALBUM in media_types:
             try:
                 data = await self._request(
-                    "/search",
+                    NETEASE_SEARCH_ENDPOINT,
                     params={"keywords": search_query, "type": NETEASE_SEARCH_TYPE_ALBUM, "limit": limit},
                 )
                 if data and "result" in data and "albums" in data["result"]:
@@ -321,7 +374,7 @@ class NeteaseProvider(MusicProvider):
         if MediaType.ARTIST in media_types:
             try:
                 data = await self._request(
-                    "/search",
+                    NETEASE_SEARCH_ENDPOINT,
                     params={"keywords": search_query, "type": NETEASE_SEARCH_TYPE_ARTIST, "limit": limit},
                 )
                 if data and "result" in data and "artists" in data["result"]:
@@ -336,7 +389,7 @@ class NeteaseProvider(MusicProvider):
         if MediaType.PLAYLIST in media_types:
             try:
                 data = await self._request(
-                    "/search",
+                    NETEASE_SEARCH_ENDPOINT,
                     params={"keywords": search_query, "type": NETEASE_SEARCH_TYPE_PLAYLIST, "limit": limit},
                 )
                 if data and "result" in data and "playlists" in data["result"]:

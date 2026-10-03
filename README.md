@@ -142,8 +142,9 @@ docker logs musicassistant
 
 **网易云 API 无响应**
 ```bash
-# 测试 API 连接
-curl http://localhost:3000/search?keywords=测试
+# 测试 API 连接（/cloudsearch 没有被网易限流，/search 可能返回 405）
+curl "http://localhost:3000/cloudsearch?keywords=测试&type=1&limit=2"
+curl http://localhost:3000/login/status
 ```
 
 **Provider 无法初始化**
@@ -151,6 +152,11 @@ curl http://localhost:3000/search?keywords=测试
 - 确认所有服务都在运行
 - 查看 MusicAssistant 日志
 - 若日志出现 `ValueError: API URL is required`，说明 Provider 版本过旧：新版 MusicAssistant 要求提供实例级 `get_config_entries()` 与 `setup_flow.py`，请更新到本仓库最新代码后重启 MusicAssistant
+
+**搜索不到任何歌曲 / 日志出现 HTTP 405**
+- 日志形如 `Unexpected error while requesting http://.../search: 405, message='Method Not Allowed'`，网易云 API 容器日志里是 `{ msg: '操作频繁，请稍候再试', code: 405 }`：这是网易对旧版 `/search` 接口的限流（大量刷新媒体库时最容易触发），而不是配置错误
+- Provider 使用 `/cloudsearch` 搜索并内置了 20 秒退避，请更新到本仓库最新代码；旧代码调用 `/search`，一旦被限流就会一直搜不到
+- 若日志出现 `'coroutine' object has no attribute 'get'` 或 `RuntimeWarning: coroutine 'MassClientResponse.json' was never awaited`，说明 Provider 把 MusicAssistant 的 aiohttp 会话当成 httpx 使用，同样更新到最新代码即可
 
 ## 📚 相关链接
 

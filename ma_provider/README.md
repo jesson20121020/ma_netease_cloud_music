@@ -181,7 +181,9 @@ ma-netease-provider/
 **排查步骤：**
 1. **测试 API 响应**
    ```bash
-   curl "http://localhost:3000/search?keywords=稻香&type=song"
+   # Provider 使用 /cloudsearch 搜索；旧版 /search 会被网易限流并返回 405
+   curl "http://localhost:3000/cloudsearch?keywords=稻香&type=1&limit=2"
+   curl "http://localhost:3000/search?keywords=稻香&type=1&limit=2"
    ```
 
 2. **检查 MusicAssistant 日志**
@@ -192,6 +194,13 @@ ma-netease-provider/
 
 3. **验证 API 服务状态**
    - 访问 `http://localhost:3000` 查看服务状态
+
+4. **日志出现 HTTP 405 / 「操作频繁」**
+   - 形如 `405, message='Method Not Allowed', url='.../search?...'`，网易云 API 容器日志里为 `{ msg: '操作频繁，请稍候再试', code: 405 }`
+   - 这是网易对旧版 `/search` 接口的限流（刷新媒体库触发大量搜索时最常见），与 API 地址配置无关；更新到本仓库最新代码（改用 `/cloudsearch` 并带 20 秒退避）后重启 MusicAssistant
+
+5. **日志出现 `'coroutine' object has no attribute 'get'`**
+   - 说明 Provider 把 MusicAssistant 共享的 aiohttp 会话当作 httpx 使用（`MassClientResponse.json` 是协程）；更新到最新代码即可（Provider 使用自己的 `httpx.AsyncClient`）
 
 ### 🎵 无法播放音乐
 

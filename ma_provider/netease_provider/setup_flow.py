@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-import httpx
+import aiohttp
 from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import ConfigEntryType
 from music_assistant_models.errors import InvalidDataError, ResourceTemporarilyUnavailable
@@ -114,28 +114,29 @@ async def _probe_api_url(session: SetupSession, api_url: str) -> None:
         msg = "API 地址不能为空"
         raise InvalidDataError(msg)
     try:
-        response = await session.mass.http_session.get(
+        # the server's shared session is an aiohttp ClientSession
+        async with session.mass.http_session.get(
             f"{api_url}{_PROBE_ENDPOINT}",
             params={"timestamp": int(time.time() * 1000)},
-            timeout=_PROBE_TIMEOUT,
-        )
-    except httpx.HTTPError as err:
+            timeout=aiohttp.ClientTimeout(total=_PROBE_TIMEOUT),
+        ) as response:
+            status = response.status
+            if 400 <= status < 500:
+                # something answered, but not the expected endpoint: wrong address
+                msg = f"{api_url} 不是可用的 NeteaseCloudMusicApi 服务地址（HTTP {status}）"
+                raise InvalidDataError(msg)
+            if status >= 500:
+                msg = f"API 地址 {api_url} 返回错误：HTTP {status}"
+                raise ResourceTemporarilyUnavailable(msg)
+            try:
+                payload = await response.json(content_type=None)
+            except ValueError as err:
+                msg = f"{api_url} 不是可用的 NeteaseCloudMusicApi 服务地址（响应不是 JSON）"
+                raise InvalidDataError(msg) from err
+    except (aiohttp.ClientError, TimeoutError) as err:
         # nothing answered at this address: it may just not be up yet
         msg = f"无法连接 API 地址 {api_url}：{err}"
         raise ResourceTemporarilyUnavailable(msg) from err
-    if 400 <= response.status_code < 500:
-        # something answered, but not the expected endpoint: wrong address
-        msg = f"{api_url} 不是可用的 NeteaseCloudMusicApi 服务地址（HTTP {response.status_code}）"
-        raise InvalidDataError(msg)
-    try:
-        response.raise_for_status()
-        payload = response.json()
-    except httpx.HTTPStatusError as err:
-        msg = f"API 地址 {api_url} 返回错误：{err}"
-        raise ResourceTemporarilyUnavailable(msg) from err
-    except ValueError as err:
-        msg = f"{api_url} 不是可用的 NeteaseCloudMusicApi 服务地址（响应不是 JSON）"
-        raise InvalidDataError(msg) from err
     if not isinstance(payload, dict) or not {"data", "code"} & set(payload):
         msg = f"{api_url} 不是可用的 NeteaseCloudMusicApi 服务地址"
         raise InvalidDataError(msg)
