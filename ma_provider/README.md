@@ -72,19 +72,27 @@ docker run -d \
 
 ### 3. 安装 Provider
 
-```bash
-# 方法一：推荐方式
-pip install -e .
+新版 MusicAssistant 通过把 Provider 目录挂载进容器来加载外部 Provider：
 
-# 方法二：手动安装
-# 将 netease_provider 目录复制到 MusicAssistant 插件目录
+```bash
+docker run -d \
+  --name musicassistant \
+  -p 8095:8095 \
+  -v /path/to/config:/data \
+  -v /path/to/ma_netease_cloud_music/ma_provider/netease_provider:/app/venv/lib/python3.14/site-packages/music_assistant/providers/netease_provider \
+  ghcr.io/music-assistant/server:latest
 ```
+
+> 也可以直接把 `netease_provider` 目录复制到 MusicAssistant 的 providers 目录。
 
 ### 4. 配置 Provider
 
-在 MusicAssistant 配置页面：
-- **API 地址**: `http://localhost:3000`
-- **解锁 API 地址**: `http://localhost:3001` (可选)
+在 MusicAssistant 的「设置 → 提供商 → 添加提供商」中选择 **Netease Cloud provider**，添加向导会要求填写：
+
+- **API 地址**（必填）: `http://localhost:3000`
+- **解锁 API 地址**（可选）: `http://localhost:3001`
+
+向导会立即探测该地址是否为可用的 NeteaseCloudMusicApi 服务，地址填错时会提示重新填写。添加完成后如需修改地址，在提供商页面使用「重新配置」即可。
 
 ## 📖 使用指南
 
@@ -129,10 +137,9 @@ Provider 通过以下接口获取数据：
 ```
 ma-netease-provider/
 ├── netease_provider/
-│   ├── __init__.py
-│   └── provider.py          # Provider 主实现文件
-├── pyproject.toml           # 项目配置文件
-├── manifest.json            # Provider 清单文件
+│   ├── __init__.py          # Provider 主实现文件
+│   ├── setup_flow.py        # 添加/重配置向导（收集并校验 API 地址）
+│   └── manifest.json        # Provider 清单文件
 └── README.md                # 说明文档
 ```
 
@@ -149,6 +156,14 @@ ma-netease-provider/
   # 检查服务是否运行
   curl http://localhost:3000/search?keywords=测试
   ```
+
+- **❌ 新版 MusicAssistant 报错 `ValueError: API URL is required`**
+  - 说明部署的是旧版 Provider：新版 MusicAssistant 不再调用旧式的
+    `get_config_entries(mass, instance_id, action, values)` 钩子，改为在 Provider
+    实例上调用 `get_config_entries()`，并通过 `setup_flow.py` 收集地址
+  - 更新 `__init__.py` 的同时必须一起部署 `setup_flow.py`，否则无法添加新的 Provider 实例
+  - 更新后重启 MusicAssistant，日志中应出现
+    `Netease Provider initialized with API URL: ...` 与 `Loaded music provider Netease Cloud provider`
 
 - **🌐 网络连接问题**
   - 检查防火墙设置

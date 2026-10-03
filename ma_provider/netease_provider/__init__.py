@@ -51,6 +51,9 @@ _LOGGER = logging.getLogger(__name__)
 CONF_KEY_API_URL = "api_url"
 CONF_KEY_UNBLOCK_API_URL = "unblock_api_url"
 
+# address a NeteaseCloudMusicApi backend listens on by default
+DEFAULT_API_URL = "http://localhost:3000"
+
 # NeteaseCloudMusicApi search types
 # 1: 单曲, 10: 专辑, 100: 歌手, 1000: 歌单, 1009: 电台, 1014: 视频
 NETEASE_SEARCH_TYPE_SONG = 1
@@ -90,6 +93,10 @@ async def get_config_entries(
     """
     Return Config entries to setup this provider.
 
+    Kept for Music Assistant versions that still resolve this module-level hook (the
+    current server resolves the instance method ``NeteaseProvider.get_config_entries``
+    instead, and collects the addresses through ``setup_flow.py``).
+
     instance_id: id of an existing provider instance (None if new instance setup).
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
@@ -100,7 +107,7 @@ async def get_config_entries(
             type=ConfigEntryType.STRING,
             label="API 地址",
             description="NeteaseCloudMusicApi 服务地址（例如：http://localhost:3000）",
-            default_value="http://localhost:3000",
+            default_value=DEFAULT_API_URL,
             required=True,
         ),
         ConfigEntry(
@@ -121,29 +128,63 @@ class NeteaseProvider(MusicProvider):
     _unblock_api_url: str | None
     _http_client: httpx.AsyncClient
 
+    async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
+        """
+        Return the (options) config entries for this provider instance.
+
+        The API addresses are collected by the setup flow (setup_flow.py) and stored as the
+        instance's setup data. The entries below exist so addresses stored by earlier
+        versions of this provider - which kept them as plain option values - are still read
+        back on load. They are hidden from the UI: change an address through the provider's
+        reconfigure flow, which is also what a fresh install uses.
+        """
+        return (
+            ConfigEntry(
+                key=CONF_KEY_API_URL,
+                type=ConfigEntryType.STRING,
+                default_value=DEFAULT_API_URL,
+                required=True,
+                hidden=True,
+            ),
+            ConfigEntry(
+                key=CONF_KEY_UNBLOCK_API_URL,
+                type=ConfigEntryType.STRING,
+                default_value="",
+                required=False,
+                hidden=True,
+            ),
+        )
+
     async def handle_async_init(self) -> None:
         """Initialize provider."""
-        api_url = self.config.get_value(CONF_KEY_API_URL)
-        if not api_url or not isinstance(api_url, str):
+        # get_setup_value reads the setup flow's value when present and otherwise falls
+        # back to the stored option value, so installs configured either way resolve.
+        api_url = self.get_setup_value(CONF_KEY_API_URL)
+        if not api_url or not isinstance(api_url, str) or not api_url.strip():
             msg = "API URL is required"
             raise ValueError(msg)
         # Remove trailing slash
-        self._api_url = api_url.rstrip("/")
+        self._api_url = api_url.strip().rstrip("/")
 
-        unblock_api_url = self.config.get_value(CONF_KEY_UNBLOCK_API_URL)
+        unblock_api_url = self.get_setup_value(CONF_KEY_UNBLOCK_API_URL)
         if unblock_api_url and isinstance(unblock_api_url, str) and unblock_api_url.strip():
-            self._unblock_api_url = unblock_api_url.rstrip("/")
+            self._unblock_api_url = unblock_api_url.strip().rstrip("/")
         else:
             self._unblock_api_url = None
 
-        self._http_client = httpx.AsyncClient(timeout=30.0)
+        # the server owns this session: using it avoids a private connection pool that
+        # would have to be torn down again when the provider unloads
+        self._http_client = self.mass.http_session
         _LOGGER.info("Netease Provider initialized with API URL: %s, Unblock API URL: %s",
                     self._api_url, self._unblock_api_url)
 
     async def close(self) -> None:
-        """Cleanup on provider close."""
-        await super().close()
-        await self._http_client.aclose()
+        """
+        Cleanup hook.
+
+        Kept for older Music Assistant versions that call it: the HTTP session belongs to
+        the server, so there is nothing of our own to release here.
+        """
 
     @property
     def is_streaming_provider(self) -> bool:
