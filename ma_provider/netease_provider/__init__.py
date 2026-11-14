@@ -57,6 +57,11 @@ CONF_KEY_COOKIE = "cookie"
 # comma separated Netease chart names to add to the library (见 https://music.163.com/#/discover/toplist)
 CONF_KEY_CHARTS = "charts"
 DEFAULT_CHARTS = "飙升榜,新歌榜,热歌榜,原创榜"
+# how many hot artists / hot (= newly released, all areas) albums to publish into the library
+CONF_KEY_HOT_ARTISTS = "hot_artists"
+CONF_KEY_HOT_ALBUMS = "hot_albums"
+DEFAULT_HOT_ARTISTS = 50
+DEFAULT_HOT_ALBUMS = 50
 
 # address a NeteaseCloudMusicApi backend listens on by default
 DEFAULT_API_URL = "http://localhost:3000"
@@ -132,6 +137,15 @@ def _clean_cookie(raw: str) -> str:
             continue
         seen[name] = value
     return "; ".join(f"{name}={value}" for name, value in seen.items())
+
+
+def _as_count(raw: Any, default: int) -> int:
+    """Return a non-negative integer config value (0 disables the feature)."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(value, 0)
 
 
 def _parse_chart_names(raw: Any) -> list[str]:
@@ -243,6 +257,8 @@ class NeteaseProvider(MusicProvider):
     _rate_limit_strikes: int
     _uid: str | None
     _charts: list[str]
+    _hot_artists: int
+    _hot_albums: int
     _last_request_at: float
     _request_lock: asyncio.Lock
 
@@ -277,6 +293,28 @@ class NeteaseProvider(MusicProvider):
                 default_value="",
                 required=False,
                 hidden=True,
+            ),
+            ConfigEntry(
+                key=CONF_KEY_HOT_ARTISTS,
+                type=ConfigEntryType.INTEGER,
+                label="同步热门歌手数量",
+                description=(
+                    "取网易云歌手榜（热门歌手）前 N 位加入媒体库；0 = 不同步。"
+                    "登录后还会额外包含你关注的歌手"
+                ),
+                default_value=DEFAULT_HOT_ARTISTS,
+                required=False,
+            ),
+            ConfigEntry(
+                key=CONF_KEY_HOT_ALBUMS,
+                type=ConfigEntryType.INTEGER,
+                label="同步热门专辑数量",
+                description=(
+                    "取网易云「新碟上架」全部地区前 N 张加入媒体库；0 = 不同步。"
+                    "登录后还会额外包含你收藏的专辑"
+                ),
+                default_value=DEFAULT_HOT_ALBUMS,
+                required=False,
             ),
             ConfigEntry(
                 key=CONF_KEY_CHARTS,
@@ -329,6 +367,12 @@ class NeteaseProvider(MusicProvider):
         # chart playlists (飙升榜/新歌榜/...) to publish into the library as well
         self._charts = _parse_chart_names(
             self.get_setup_value(CONF_KEY_CHARTS, DEFAULT_CHARTS) or DEFAULT_CHARTS
+        )
+        self._hot_artists = _as_count(
+            self.get_setup_value(CONF_KEY_HOT_ARTISTS, DEFAULT_HOT_ARTISTS), DEFAULT_HOT_ARTISTS
+        )
+        self._hot_albums = _as_count(
+            self.get_setup_value(CONF_KEY_HOT_ALBUMS, DEFAULT_HOT_ALBUMS), DEFAULT_HOT_ALBUMS
         )
 
         # Keep a private httpx client: this provider's request helpers are written against
@@ -1392,96 +1436,64 @@ class NeteaseProvider(MusicProvider):
 
     # Library methods - return empty for now as this is a streaming provider
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
-        """Retrieve library artists from the provider."""
+        """Retrieve library artists: followed ones (when logged in) plus the hot chart."""
+        seen: set[str] = set()
         if self._uid:
-            # logged in: the artists the account follows
-            data = await self._request("/artist/sublist", params={"limit": 200, "offset": 0})
-            artists_list = _payload_list(data, "data", "artists")
-            _LOGGER.info("Netease library artists: %d followed artist(s)", len(artists_list))
-            for artist_data in artists_list:
+            data = await self._request("/artist/sublist", params={"limit": 500, "offset": 0})
+            followed = _payload_list(data, "data", "artists")
+            _LOGGER.info("Netease library artists: %d followed artist(s)", len(followed))
+            for artist_data in followed:
                 artist = await self._parse_artist_from_search(artist_data)
-                if artist:
+                if artist and artist.item_id not in seen:
+                    seen.add(artist.item_id)
                     yield artist
+        if self._hot_artists <= 0:
+            _LOGGER.info("Netease library artists: hot chart disabled (hot_artists=0)")
             return
-        _LOGGER.debug("get_library_artists called - returning popular/hot artists as library")
-
-        # For streaming provider, return popular/hot artists as library
-        _LOGGER.debug("Requesting top artists from API: /top/artists with limit=50")
-        data = await self._request("/top/artists", params={"limit": 50, "offset": 0})
-
-        if not data:
-            _LOGGER.warning("No data returned from /top/artists API")
-            return
-
-        if "artists" not in data:
-            _LOGGER.warning(f"No 'artists' key in API response. Response keys: {list(data.keys())}")
-            return
-
-        artists_list = data["artists"]
-        _LOGGER.debug(f"Received {len(artists_list)} artists from API")
-
-        count = 0
-        for artist_data in artists_list:
-            artist_name = artist_data.get("name", "Unknown")
-            artist_id = artist_data.get("id", "Unknown")
-
-            _LOGGER.debug(f"Processing artist: {artist_name} (ID: {artist_id})")
-
+        data = await self._request(
+            "/top/artists", params={"limit": self._hot_artists, "offset": 0}
+        )
+        added = 0
+        for artist_data in _payload_list(data, "artists"):
             artist = await self._parse_artist_from_search(artist_data)
-            if artist:
-                count += 1
-                _LOGGER.debug(f"Successfully yielded artist {count}: {artist.name}")
+            if artist and artist.item_id not in seen:
+                seen.add(artist.item_id)
+                added += 1
                 yield artist
-            else:
-                _LOGGER.warning(f"Failed to parse artist: {artist_name}")
-
-        _LOGGER.debug(f"Total yielded {count} artists from get_library_artists")
+        _LOGGER.info("Netease library artists: %d hot artist(s) added", added)
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
-        """Retrieve library albums from the provider."""
+        """Retrieve library albums: collected ones (when logged in) plus new releases."""
+        seen: set[str] = set()
         if self._uid:
-            # logged in: the albums the account collected
-            data = await self._request("/album/sublist", params={"limit": 200, "offset": 0})
-            albums_list = _payload_list(data, "data", "albums")
-            _LOGGER.info("Netease library albums: %d saved album(s)", len(albums_list))
-            for album_data in albums_list:
-                # the sublist spells the artists as a list, the search payload as "artist"
-                if isinstance(album_data.get("artists"), list) and album_data["artists"]:
-                    album_data = {**album_data, "artist": album_data["artists"][0]}
-                album = await self._parse_album_from_search(album_data)
-                if album:
+            data = await self._request("/album/sublist", params={"limit": 500, "offset": 0})
+            saved = _payload_list(data, "data", "albums")
+            _LOGGER.info("Netease library albums: %d saved album(s)", len(saved))
+            for album_data in saved:
+                album = await self._parse_album_row(album_data)
+                if album and album.item_id not in seen:
+                    seen.add(album.item_id)
                     yield album
+        if self._hot_albums <= 0:
+            _LOGGER.info("Netease library albums: new releases disabled (hot_albums=0)")
             return
-        _LOGGER.debug("get_library_albums called - returning newest albums as library")
-
-        # Use /album/newest API to get the latest albums
-        _LOGGER.debug("Requesting newest albums from API: /album/newest")
-        data = await self._request("/album/newest", params={})
-
-        if not data or "albums" not in data:
-            _LOGGER.warning("No albums data returned from /album/newest API")
-            return
-
-        albums_list = data["albums"]
-        _LOGGER.debug(f"Received {len(albums_list)} newest albums from API")
-
-        count = 0
-        for album_data in albums_list:
-            album_name = album_data.get("name", "Unknown Album")
-            album_id = str(album_data.get("id", ""))
-
-            _LOGGER.debug(f"Processing newest album: {album_name} (ID: {album_id})")
-
-            # Parse album
-            album = await self._parse_album_from_search(album_data)
-            if album:
-                count += 1
-                _LOGGER.debug(f"Successfully yielded album {count}: {album.name}")
+        data = await self._request(
+            "/album/new", params={"area": "ALL", "limit": self._hot_albums, "offset": 0}
+        )
+        added = 0
+        for album_data in _payload_list(data, "albums"):
+            album = await self._parse_album_row(album_data)
+            if album and album.item_id not in seen:
+                seen.add(album.item_id)
+                added += 1
                 yield album
-            else:
-                _LOGGER.warning(f"Failed to parse album: {album_name}")
+        _LOGGER.info("Netease library albums: %d hot album(s) added", added)
 
-        _LOGGER.debug(f"Total yielded {count} albums from get_library_albums")
+    async def _parse_album_row(self, album_data: dict[str, Any]) -> Album | None:
+        """Parse an album row from the sublist/new-release endpoints (artists -> artist)."""
+        if isinstance(album_data.get("artists"), list) and album_data["artists"]:
+            album_data = {**album_data, "artist": album_data["artists"][0]}
+        return await self._parse_album_from_search(album_data)
 
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
         """Retrieve library tracks from the provider."""

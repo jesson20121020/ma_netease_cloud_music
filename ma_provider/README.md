@@ -131,8 +131,8 @@ docker run -d \
 |---|---|---|
 | 歌单 | `/user/playlist` 账号自己创建 + 收藏的歌单（含「我喜欢的音乐」、年度歌单） | `/top/playlist/highquality` 热门歌单 |
 | 曲目 | `/likelist` 我喜欢的音乐 | 热门歌单里抽若干首 |
-| 歌手 | `/artist/sublist` 关注的歌手 | `/top/artists` 热门歌手 |
-| 专辑 | `/album/sublist` 收藏的专辑 | `/album/newest` 最新专辑 |
+| 歌手 | 关注的歌手（`/artist/sublist`）**+ 热门歌手**（`/top/artists`，数量由 `hot_artists` 控制，默认 50） | 热门歌手 |
+| 专辑 | 收藏的专辑（`/album/sublist`）**+ 新碟上架**（`/album/new?area=ALL`，数量由 `hot_albums` 控制，默认 50） | 新碟上架 |
 | 榜单 | `/toplist` 里按配置挑的榜单歌单（默认 飙升榜/新歌榜/热歌榜/原创榜） | 同左（榜单是公开数据） |
 
 榜单歌单在 Provider 设置里的「同步的榜单歌单」一栏配置（逗号分隔，留空不同步）。名字取自
@@ -141,6 +141,9 @@ docker run -d \
 支持部分名（如 `ACG`，前提是只匹配到一个），匹配不到的会在日志里列出可用名字。
 也可以直接填 `ALL`（等价于 `*` / `全部`）一次同步**全部榜单**——当前是 65 个（官方榜 + 云音乐特色榜 +
 全球榜 + 合作/车友榜），日志会打印 `Netease library charts: syncing all 65 chart playlist(s)`。
+
+热门歌手/热门专辑的数量在 Provider 设置里配：`同步热门歌手数量`、`同步热门专辑数量`（0 = 不同步，
+默认都是 50；登录后会额外叠加关注歌手 / 收藏专辑并去重）。
 
 同步时日志会打印数量，例如：
 
