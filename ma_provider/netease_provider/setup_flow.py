@@ -15,9 +15,13 @@ user scans the code with the NetEase Cloud Music app and the resulting cookie is
 raises the quota a lot and unlocks the account's own playlists). A cookie copied from
 ``/login/cellphone`` can still be pasted instead, and anonymous use stays possible.
 
-The QR code is minted against the chosen backend, shown as a PROGRESS step image, and
-minted afresh whenever its scan window elapses, so the displayed code never silently goes
-stale.
+The QR login talks to NetEase directly instead of going through the backend's
+``/login/qr/*`` helpers: those hard-code ``type=3`` (the third-party-client scan channel),
+which NetEase's risk engine answers with 「检测到当前设备环境异常，本次操作已拦截」. The
+official web login uses ``type=1`` (``/api/login/qrcode/unikey`` and
+``/api/login/qrcode/client/login`` with ``noCheckToken`` and an ``X-loginMethod: qr_code``
+header), so that is what this flow does; the backend is only asked to encode the QR image
+for a key we minted ourselves. The shown code is refreshed whenever its scan window elapses.
 """
 
 from __future__ import annotations
@@ -50,10 +54,20 @@ CONF_KEY_QR_LOGIN = "qr_login"
 _PROBE_ENDPOINT = "/login/status"
 _PROBE_TIMEOUT = 10.0
 
-# NeteaseCloudMusicApi QR login endpoints (all GET, all on the backend address)
-_QR_KEY_ENDPOINT = "/login/qr/key"
+# QR login is spoken with NetEase itself (type=1 = the official web login channel), because the
+# backend's own /login/qr/* helpers use type=3, which the risk engine blocks with
+# 「检测到当前设备环境异常，本次操作已拦截」
+_QR_UNIKEY_URL = "https://music.163.com/api/login/qrcode/unikey"
+_QR_CHECK_URL = "https://music.163.com/api/login/qrcode/client/login"
+_QR_LOGIN_METHOD = "qr_code"
+_QR_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+_QR_REFERER = "https://music.163.com/"
+# the backend only encodes the QR image for a key we minted (no NetEase call happens there)
 _QR_CREATE_ENDPOINT = "/login/qr/create"
-_QR_CHECK_ENDPOINT = "/login/qr/check"
+_QR_REQUEST_TIMEOUT = 10.0
 
 # scan window (seconds) a shown QR code is valid for before a fresh one is minted
 _QR_EXPIRES_IN = 120.0
@@ -66,6 +80,8 @@ _QR_MAX_REFRESHES = 30
 _QR_PROGRESS_TEXT = (
     "打开手机上的「网易云音乐」App → 右上角「+」→ 扫一扫，扫描上面的二维码并在手机上确认登录。"
     "二维码 120 秒过期后会自动换一张新的，确认后这一步会自动完成。"
+    "若手机提示「设备环境异常，本次操作已拦截」，请先在 App 里完成一次安全验证（我 → 设置 → 账号与安全）"
+    "再重新打开本向导。"
 )
 
 # Netease QR check status codes
@@ -74,9 +90,12 @@ _QR_CODE_WAITING_SCAN = 801
 _QR_CODE_WAITING_CONFIRM = 802
 _QR_CODE_CONFIRMED = 803
 
-# cookie attributes the backend appends to Set-Cookie style strings; they are not part of the
+# cookie attributes the backend may append to Set-Cookie style strings; they are not part of the
 # cookie value NeteaseCloudMusicApi expects as a request parameter
 _COOKIE_ATTRIBUTES = {"expires", "max-age", "path", "domain", "secure", "httponly", "samesite"}
+
+# cookies that carry the logged-in session (everything else in the jar is guest bookkeeping)
+_SESSION_COOKIE_NAMES = ("MUSIC_U", "__csrf")
 
 
 class QRLoginError(Exception):
@@ -236,66 +255,78 @@ async def _run_qr_login(session: SetupSession, api_url: str) -> str:
 
     A fresh QR code is minted and the PROGRESS step re-emitted whenever the scan window
     elapses (or the backend reports the code expired), so the displayed code stays valid.
+    One HTTP session is kept for the whole flow: NetEase ties the codekey to the cookies it
+    set when the key was minted, so the poll must reuse them.
 
     :param session: The setup session driving the flow.
-    :param api_url: The NeteaseCloudMusicApi backend address.
+    :param api_url: The NeteaseCloudMusicApi backend address (used to encode the QR image).
     """
-    for _attempt in range(_QR_MAX_REFRESHES):
-        qr_key, qr_image = await _create_qr(session, api_url)
-        try:
-            return await session.progress_until(
-                _poll_qr_login(session, api_url, qr_key),
-                step_id="scan_qr",
-                # the PROGRESS step renders progress_text below the image (its title comes from
-                # the translation bundle, which a bind-mounted provider does not have)
-                text=_QR_PROGRESS_TEXT,
-                image=qr_image,
-                expires_in=_QR_EXPIRES_IN,
-            )
-        except StepExpiredError:
-            continue
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=_QR_REQUEST_TIMEOUT)
+    ) as http_session:
+        for _attempt in range(_QR_MAX_REFRESHES):
+            qr_key, qr_image = await _create_qr(session, http_session, api_url)
+            try:
+                return await session.progress_until(
+                    _poll_qr_login(http_session, qr_key),
+                    step_id="scan_qr",
+                    # the PROGRESS step renders progress_text below the image (its title comes
+                    # from the translation bundle, which a bind-mounted provider does not have)
+                    text=_QR_PROGRESS_TEXT,
+                    image=qr_image,
+                    expires_in=_QR_EXPIRES_IN,
+                )
+            except StepExpiredError:
+                continue
     msg = "二维码多次刷新仍未完成登录，已放弃扫码，请重试或改用 cookie 方式"
     raise QRLoginError(msg)
 
 
-async def _create_qr(session: SetupSession, api_url: str) -> tuple[str, str]:
+async def _create_qr(
+    session: SetupSession, http_session: aiohttp.ClientSession, api_url: str
+) -> tuple[str, str]:
     """
-    Create a fresh QR login session and return its poll key and data-URI image.
+    Mint a QR login key at NetEase and have the backend encode it as a data-URI image.
 
     :param session: The setup session driving the flow.
+    :param http_session: The HTTP session shared by the whole QR flow.
     :param api_url: The NeteaseCloudMusicApi backend address.
     """
-    key_payload = await _get_json(session, f"{api_url}{_QR_KEY_ENDPOINT}", {})
-    key_data = _payload_data(key_payload)
-    qr_key = str(key_data.get("unikey") or key_data.get("key") or "").strip()
+    key_payload = await _netease_post(
+        http_session, _QR_UNIKEY_URL, {"type": "1", "noCheckToken": "true"}
+    )
+    qr_key = str(key_payload.get("unikey") or "").strip()
     if not qr_key:
-        msg = "后端没有返回二维码 key，请确认 API 地址指向 NeteaseCloudMusicApi"
+        msg = "网易云没有返回二维码 key，请确认网络能访问 music.163.com"
         raise QRLoginError(msg)
-    qr_payload = await _get_json(
+    # the backend's create endpoint only QR-encodes the given key locally (it never calls
+    # NetEase), so our type=1 key keeps the official web-login semantics
+    img_payload = await _get_json(
         session, f"{api_url}{_QR_CREATE_ENDPOINT}", {"key": qr_key, "qrimg": "true"}
     )
-    qr_data = _payload_data(qr_payload)
-    # the backend already returns qrimg as a data:image/png;base64,... string, which is
-    # exactly what the PROGRESS step takes, so it is emitted verbatim (no re-encoding)
-    qr_image = str(qr_data.get("qrimg") or "").strip()
+    img_data = _payload_data(img_payload)
+    qr_image = str(img_data.get("qrimg") or "").strip()
     if not qr_image:
         msg = "后端没有返回二维码图片，请确认 API 地址指向 NeteaseCloudMusicApi"
         raise QRLoginError(msg)
     return qr_key, qr_image
 
 
-async def _poll_qr_login(session: SetupSession, api_url: str, qr_key: str) -> str:
+async def _poll_qr_login(http_session: aiohttp.ClientSession, qr_key: str) -> str:
     """
-    Poll the QR check endpoint until the login is confirmed, returning the session cookie.
+    Poll NetEase until the shown QR code is confirmed, returning the session cookie.
 
-    :param session: The setup session driving the flow.
-    :param api_url: The NeteaseCloudMusicApi backend address.
-    :param qr_key: The QR poll key from _create_qr.
+    :param http_session: The HTTP session shared by the whole QR flow (carries the codekey
+        cookies NetEase set when the key was minted).
+    :param qr_key: The unikey from _create_qr.
     """
     while True:
         try:
-            payload = await _get_json(
-                session, f"{api_url}{_QR_CHECK_ENDPOINT}", {"key": qr_key}
+            payload = await _netease_post(
+                http_session,
+                _QR_CHECK_URL,
+                {"key": qr_key, "type": "1", "noCheckToken": "true"},
+                login_method=_QR_LOGIN_METHOD,
             )
         except (ResourceTemporarilyUnavailable, QRLoginError) as err:
             # a transient hiccup while polling must not kill the shown QR code
@@ -303,10 +334,13 @@ async def _poll_qr_login(session: SetupSession, api_url: str, qr_key: str) -> st
             await asyncio.sleep(_QR_POLL_INTERVAL)
             continue
         code = _payload_code(payload)
+        _LOGGER.debug(
+            "QR login poll: code=%s message=%s", code, payload.get("message") or payload.get("msg")
+        )
         if code == _QR_CODE_CONFIRMED:
-            cookie = _clean_cookie(_payload_cookie(payload))
+            cookie = _session_cookie(http_session)
             if not cookie:
-                msg = "扫码已确认，但后端没有返回 cookie"
+                msg = "扫码已确认，但没有取到登录 cookie"
                 raise QRLoginError(msg)
             return cookie
         if code == _QR_CODE_EXPIRED:
@@ -314,6 +348,68 @@ async def _poll_qr_login(session: SetupSession, api_url: str, qr_key: str) -> st
             raise StepExpiredError
         # 801 (waiting for scan) / 802 (scanned, waiting for confirm): keep polling
         await asyncio.sleep(_QR_POLL_INTERVAL)
+
+
+def _session_cookie(http_session: aiohttp.ClientSession) -> str:
+    """
+    Build the NeteaseCloudMusicApi cookie string from what NetEase set after the confirmation.
+
+    :param http_session: The HTTP session shared by the whole QR flow.
+    """
+    from yarl import URL  # noqa: PLC0415 - already a hard dependency of aiohttp
+
+    try:
+        jar_cookies = http_session.cookie_jar.filter_cookies(URL(_QR_CHECK_URL))
+    except Exception:  # noqa: BLE001 - cookie extraction must never mask the real failure
+        return ""
+    values = {cookie.key: cookie.value for cookie in jar_cookies.values()}
+    if not values.get("MUSIC_U"):
+        return ""
+    # keep the session cookies (MUSIC_U/__csrf) plus the guest bookkeeping cookies, dropping
+    # anything NetEase uses to track visitors between unrelated sessions
+    ordered = [name for name in _SESSION_COOKIE_NAMES if name in values]
+    ordered.extend(name for name in values if name not in ordered)
+    return _clean_cookie("; ".join(f"{name}={values[name]}" for name in ordered))
+
+
+async def _netease_post(
+    http_session: aiohttp.ClientSession,
+    url: str,
+    data: dict[str, str],
+    login_method: str | None = None,
+) -> dict[str, Any]:
+    """
+    POST a form body to NetEase and return the parsed JSON.
+
+    :param http_session: The HTTP session shared by the whole QR flow.
+    :param url: Full request URL.
+    :param data: Form fields.
+    :param login_method: Optional X-loginMethod header (the official web client sends it).
+    """
+    headers = {"User-Agent": _QR_BROWSER_UA, "Referer": _QR_REFERER}
+    if login_method:
+        headers["X-loginMethod"] = login_method
+    try:
+        async with http_session.post(
+            url,
+            data=data,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=_QR_REQUEST_TIMEOUT),
+        ) as response:
+            if response.status >= 400:
+                msg = f"{url} 返回错误：HTTP {response.status}"
+                raise ResourceTemporarilyUnavailable(msg)
+            payload = await response.json(content_type=None)
+    except (aiohttp.ClientError, TimeoutError) as err:
+        msg = f"无法连接 {url}：{err}"
+        raise ResourceTemporarilyUnavailable(msg) from err
+    except ValueError as err:
+        msg = f"{url} 返回的不是 JSON"
+        raise QRLoginError(msg) from err
+    if not isinstance(payload, dict):
+        msg = f"{url} 返回的不是 JSON 对象"
+        raise QRLoginError(msg)
+    return payload
 
 
 async def _get_json(
@@ -370,16 +466,6 @@ def _payload_code(payload: dict[str, Any]) -> int | None:
         if isinstance(candidate, str) and candidate.isdigit():
             return int(candidate)
     return None
-
-
-def _payload_cookie(payload: dict[str, Any]) -> str:
-    """
-    Extract the cookie string of a confirmed QR check response.
-
-    :param payload: The parsed response.
-    """
-    cookie = payload.get("cookie") or _payload_data(payload).get("cookie")
-    return str(cookie or "").strip()
 
 
 def _clean_cookie(raw: str) -> str:

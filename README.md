@@ -179,15 +179,23 @@ curl http://localhost:3000/login/status
 - 保持「扫码登录（推荐）」勾选 → 下一步显示二维码 → 手机**网易云音乐 App → 扫一扫** → 在手机上确认
 - 确认后向导自动完成并把 cookie 存到该实例；日志里出现 `login cookie: yes` 即表示已登录
 
-底层就是这个接口（也可用命令行扮演同一个流程）：
+**如果手机提示「检测到当前设备环境异常，本次操作已拦截」**
+- 这是网易云的风控拦截，不是配置错误。原因：NeteaseCloudMusicApi 的 `/login/qr/*` 把二维码固定用 `type=3`（第三方客户端扫码通道）创建，风控更严
+- 官方网页登录用的是 `type=1`；本 Provider 已经改走这条通道（直接和 music.163.com 对话，见下），后端只负责把 key 编码成二维码图片
+- 若仍被拦截：先在 App 里完成一次安全验证（我 → 设置 → 账号与安全），或在手机上用官方网页 `music.163.com` 登录一次，再回来重新扫码
+
+底层就是这个流程（和网页版登录完全一致）：
 ```bash
-# 1) 取二维码 key
-curl "http://192.168.31.1:3001/login/qr/key"
-# 2) 用返回的 unikey 生成二维码（qrimg 是可直接显示的 data:image/png;base64）
+# 1) 直接向网易云要 unikey，type=1 = 网页登录通道
+curl -X POST 'https://music.163.com/api/login/qrcode/unikey' -d 'type=1&noCheckToken=true'
+# 2) 用 API 把 key 编码成二维码图片（这一步只是本地生成图片，不会请求网易云）
 curl "http://192.168.31.1:3001/login/qr/create?key=<unikey>&qrimg=true"
-# 3) 轮询结果：801 等待扫码 / 802 已扫码待确认 / 803 成功（返回 cookie）/ 800 已过期
-curl "http://192.168.31.1:3001/login/qr/check?key=<unikey>"
+# 3) 轮询：801 等待扫码 / 802 已扫码待确认 / 803 成功（响应 Set-Cookie 里有 MUSIC_U）/ 800 已过期
+curl -X POST 'https://music.163.com/api/login/qrcode/client/login' \
+  -H 'X-loginMethod: qr_code' -d 'key=<unikey>&type=1&noCheckToken=true'
 ```
+
+> 注：`http://<API地址>/login/qr/*` 那三个快捷接口也能出码，但它们用的是 type=3，容易被风控拦截，所以 Provider 不用它们。
 
 **备用：手机号+密码换 cookie**
 ```bash

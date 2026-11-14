@@ -232,11 +232,15 @@ ma-netease-provider/
    - 保持「扫码登录（推荐）」勾选 → 下一步显示二维码 → 手机网易云音乐 App 扫一扫 → 手机上确认
    - 确认后向导自动完成并把 cookie 写入该实例；日志出现 `login cookie: yes` 即已登录
    ```bash
-   # 命令行等价流程
-   curl "http://localhost:3000/login/qr/key"                      # 取 unikey
-   curl "http://localhost:3000/login/qr/create?key=<unikey>&qrimg=true"   # qrimg 可直接显示
-   curl "http://localhost:3000/login/qr/check?key=<unikey>"       # 803 成功后返回 cookie
+   # 命令行等价流程（type=1 = 官方网页登录通道，绕开 API 固定的 type=3 风控）
+   curl -X POST 'https://music.163.com/api/login/qrcode/unikey' -d 'type=1&noCheckToken=true'
+   curl "http://localhost:3000/login/qr/create?key=<unikey>&qrimg=true"        # 仅本地编码图片
+   curl -X POST 'https://music.163.com/api/login/qrcode/client/login' \
+     -H 'X-loginMethod: qr_code' -d 'key=<unikey>&type=1&noCheckToken=true'   # 803 后 Set-Cookie 带 MUSIC_U
    ```
+
+   > 手机提示「检测到当前设备环境异常，本次操作已拦截」= 网易云风控。Provider 已改用官方网页的
+   > `type=1` 通道；若仍被拦截，先在 App 里完成一次安全验证，或用官方网页登录一次再回来扫码。
    备用（不方便扫码时）：`curl -X POST "http://localhost:3000/login/cellphone?phone=手机号&password=密码"` 取 cookie 填到「登录 Cookie」，再用 `curl "http://localhost:3000/login/status?cookie=粘贴的cookie"` 验证 `anonimousUser` 不为 `true`。
 
 7. **日志出现 `'coroutine' object has no attribute 'get'`**
