@@ -317,6 +317,7 @@ async def _poll_qr_login(http_session: aiohttp.ClientSession, qr_key: str) -> st
         cookies NetEase set when the key was minted).
     :param qr_key: The unikey from _create_qr.
     """
+    last_code: int | None = None
     while True:
         try:
             payload = await _netease_post(
@@ -332,13 +333,10 @@ async def _poll_qr_login(http_session: aiohttp.ClientSession, qr_key: str) -> st
             continue
         code = _payload_code(payload)
         message = payload.get("message") or payload.get("msg") or ""
-        if code == _QR_CODE_WAITING_CONFIRM:
-            # scanned on the phone, waiting for the user to confirm there
-            _LOGGER.info("QR login: code scanned, waiting for the confirmation on the phone")
-        elif code == _QR_CODE_CONFIRMED:
-            _LOGGER.info("QR login: confirmed by the phone")
-        else:
-            _LOGGER.debug("QR login poll: code=%s message=%s", code, message)
+        if code != last_code:
+            # one line per state so the log tells "nobody scanned" from "scanned but refused"
+            _LOGGER.info("QR login state: code=%s message=%s", code, message)
+            last_code = code
         if code == _QR_CODE_CONFIRMED:
             cookie = _session_cookie(http_session)
             if not cookie:
@@ -346,10 +344,18 @@ async def _poll_qr_login(http_session: aiohttp.ClientSession, qr_key: str) -> st
                 raise QRLoginError(msg)
             return cookie
         if code == _QR_CODE_EXPIRED:
-            # let the caller mint a fresh code alongside the step deadline
+            # the code is dead: let the caller mint a fresh one
             raise StepExpiredError
-        # 801 (waiting for scan) / 802 (scanned, waiting for confirm): keep polling
-        await asyncio.sleep(_QR_POLL_INTERVAL)
+        if code in (_QR_CODE_WAITING_SCAN, _QR_CODE_WAITING_CONFIRM):
+            # 801 waiting for the scan, 802 scanned and waiting for the confirmation
+            await asyncio.sleep(_QR_POLL_INTERVAL)
+            continue
+        # anything else is Netease refusing the login outright, e.g. 8821
+        # 「请切换其他登录方式或升级新版本再试」 - spinning on it would leave the wizard stuck
+        # forever, so surface the refusal instead
+        msg = f"网易云拒绝了扫码登录：{message or '未知错误'}（code {code}），" \
+              "请改用「登录 Cookie」方式"
+        raise QRLoginError(msg)
 
 
 def _session_cookie(http_session: aiohttp.ClientSession) -> str:
