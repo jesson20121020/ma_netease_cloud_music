@@ -135,13 +135,20 @@ def _clean_cookie(raw: str) -> str:
 
 
 def _parse_chart_names(raw: Any) -> list[str]:
-    """Split a comma/slash/顿号 separated chart name list into unique names."""
+    """
+    Split a comma/顿号/slash separated chart name list into unique names.
+
+    The single token ``all`` (``*`` / ``全部``) means "every chart Netease publishes"
+    and is returned as ``["*"]``.
+    """
     text = str(raw or "").replace("，", ",").replace("、", ",").replace("/", ",")
     names: list[str] = []
     for part in text.split(","):
         name = part.strip()
         if name and name not in names:
             names.append(name)
+    if len(names) == 1 and names[0].lower() in {"all", "*", "全部", "所有"}:
+        return ["*"]
     return names
 
 
@@ -1591,6 +1598,17 @@ class NeteaseProvider(MusicProvider):
         by_name = {
             str(item.get("name")): item for item in charts if isinstance(item.get("name"), str)
         }
+        if self._charts == ["*"]:
+            _LOGGER.info(
+                "Netease library charts: syncing all %d chart playlist(s)", len(by_name)
+            )
+            for item in charts:
+                if not isinstance(item.get("name"), str):
+                    continue
+                playlist = await self._parse_playlist_from_search(item)
+                if playlist:
+                    yield playlist
+            return
         resolved: list[dict[str, Any]] = []
         for name in self._charts:
             item = by_name.get(name)
