@@ -69,8 +69,6 @@ _QR_REFERER = "https://music.163.com/"
 _QR_CREATE_ENDPOINT = "/login/qr/create"
 _QR_REQUEST_TIMEOUT = 10.0
 
-# scan window (seconds) a shown QR code is valid for before a fresh one is minted
-_QR_EXPIRES_IN = 120.0
 # delay (seconds) between poll attempts against the QR check endpoint
 _QR_POLL_INTERVAL = 1.5
 # hard limit of fresh QR codes per setup run (~1 hour), so a flow left open does not poll forever
@@ -266,17 +264,16 @@ async def _run_qr_login(session: SetupSession, api_url: str) -> str:
     ) as http_session:
         for _attempt in range(_QR_MAX_REFRESHES):
             qr_key, qr_image = await _create_qr(session, http_session, api_url)
+            # Publish the step fire-and-forget and poll without a step deadline: with a
+            # deadline the engine cancels the poll and mints a new code while the old one is
+            # still on screen, so a user who scans a moment too late confirms a code nobody
+            # polls any more - the dialog then spins forever. The code is replaced only when
+            # NetEase reports it expired (800).
+            session.progress("scan_qr", text=_QR_PROGRESS_TEXT, image=qr_image)
             try:
-                return await session.progress_until(
-                    _poll_qr_login(http_session, qr_key),
-                    step_id="scan_qr",
-                    # the PROGRESS step renders progress_text below the image (its title comes
-                    # from the translation bundle, which a bind-mounted provider does not have)
-                    text=_QR_PROGRESS_TEXT,
-                    image=qr_image,
-                    expires_in=_QR_EXPIRES_IN,
-                )
+                return await _poll_qr_login(http_session, qr_key)
             except StepExpiredError:
+                _LOGGER.info("QR code reported expired by Netease, minting a fresh one")
                 continue
     msg = "二维码多次刷新仍未完成登录，已放弃扫码，请重试或改用 cookie 方式"
     raise QRLoginError(msg)
@@ -334,9 +331,14 @@ async def _poll_qr_login(http_session: aiohttp.ClientSession, qr_key: str) -> st
             await asyncio.sleep(_QR_POLL_INTERVAL)
             continue
         code = _payload_code(payload)
-        _LOGGER.debug(
-            "QR login poll: code=%s message=%s", code, payload.get("message") or payload.get("msg")
-        )
+        message = payload.get("message") or payload.get("msg") or ""
+        if code == _QR_CODE_WAITING_CONFIRM:
+            # scanned on the phone, waiting for the user to confirm there
+            _LOGGER.info("QR login: code scanned, waiting for the confirmation on the phone")
+        elif code == _QR_CODE_CONFIRMED:
+            _LOGGER.info("QR login: confirmed by the phone")
+        else:
+            _LOGGER.debug("QR login poll: code=%s message=%s", code, message)
         if code == _QR_CODE_CONFIRMED:
             cookie = _session_cookie(http_session)
             if not cookie:
