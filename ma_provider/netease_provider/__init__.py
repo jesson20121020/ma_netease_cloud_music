@@ -54,6 +54,9 @@ _LOGGER = logging.getLogger(__name__)
 CONF_KEY_API_URL = "api_url"
 CONF_KEY_UNBLOCK_API_URL = "unblock_api_url"
 CONF_KEY_COOKIE = "cookie"
+# comma separated Netease chart names to add to the library (见 https://music.163.com/#/discover/toplist)
+CONF_KEY_CHARTS = "charts"
+DEFAULT_CHARTS = "飙升榜,新歌榜,热歌榜,原创榜"
 
 # address a NeteaseCloudMusicApi backend listens on by default
 DEFAULT_API_URL = "http://localhost:3000"
@@ -129,6 +132,17 @@ def _clean_cookie(raw: str) -> str:
             continue
         seen[name] = value
     return "; ".join(f"{name}={value}" for name, value in seen.items())
+
+
+def _parse_chart_names(raw: Any) -> list[str]:
+    """Split a comma/slash/顿号 separated chart name list into unique names."""
+    text = str(raw or "").replace("，", ",").replace("、", ",").replace("/", ",")
+    names: list[str] = []
+    for part in text.split(","):
+        name = part.strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _payload_list(payload: Any, *keys: str) -> list[dict[str, Any]]:
@@ -221,6 +235,7 @@ class NeteaseProvider(MusicProvider):
     _rate_limited_until: float
     _rate_limit_strikes: int
     _uid: str | None
+    _charts: list[str]
     _last_request_at: float
     _request_lock: asyncio.Lock
 
@@ -255,6 +270,18 @@ class NeteaseProvider(MusicProvider):
                 default_value="",
                 required=False,
                 hidden=True,
+            ),
+            ConfigEntry(
+                key=CONF_KEY_CHARTS,
+                type=ConfigEntryType.STRING,
+                label="同步的榜单歌单",
+                description=(
+                    "逗号分隔的榜单名，会把网易云的榜单歌单一起同步进媒体库；留空则不同步。"
+                    "名字取自 https://music.163.com/#/discover/toplist，例如："
+                    "飙升榜,新歌榜,热歌榜,原创榜,网易云摇滚榜,网易云国风榜,网易云ACG动画榜"
+                ),
+                default_value=DEFAULT_CHARTS,
+                required=False,
             ),
         )
 
@@ -292,6 +319,10 @@ class NeteaseProvider(MusicProvider):
         self._cookie = cookie or None
         # Netease uid of the logged-in account (None while anonymous); library methods use it
         self._uid = None
+        # chart playlists (飙升榜/新歌榜/...) to publish into the library as well
+        self._charts = _parse_chart_names(
+            self.get_setup_value(CONF_KEY_CHARTS, DEFAULT_CHARTS) or DEFAULT_CHARTS
+        )
 
         # Keep a private httpx client: this provider's request helpers are written against
         # httpx, while Music Assistant's shared session is an aiohttp ClientSession (there
@@ -1509,54 +1540,82 @@ class NeteaseProvider(MusicProvider):
         _LOGGER.debug(f"Total yielded {count} tracks from get_library_tracks")
 
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
-        """Retrieve library/subscribed playlists from the provider."""
+        """Retrieve library/subscribed playlists (account playlists + configured charts)."""
         if self._uid:
-            # logged in: the account's own + subscribed playlists (including 我喜欢的音乐)
-            data = await self._request(
-                "/user/playlist", params={"uid": self._uid, "limit": 1000, "offset": 0}
-            )
-            playlists_list = _payload_list(data, "playlist")
-            _LOGGER.info(
-                "Netease library playlists: %d playlist(s) of account %s",
-                len(playlists_list),
-                self._uid,
-            )
-            for playlist_data in playlists_list:
-                playlist = await self._parse_playlist_from_search(playlist_data)
-                if playlist:
-                    yield playlist
-            return
+            async for playlist in self._account_playlists():
+                yield playlist
+        else:
+            async for playlist in self._popular_playlists():
+                yield playlist
+        async for playlist in self._chart_playlists():
+            yield playlist
+
+    async def _account_playlists(self) -> AsyncGenerator[Playlist, None]:
+        """Yield the logged-in account's own + subscribed playlists (incl. 我喜欢的音乐)."""
+        data = await self._request(
+            "/user/playlist", params={"uid": self._uid, "limit": 1000, "offset": 0}
+        )
+        playlists_list = _payload_list(data, "playlist")
+        _LOGGER.info(
+            "Netease library playlists: %d playlist(s) of account %s",
+            len(playlists_list),
+            self._uid,
+        )
+        for playlist_data in playlists_list:
+            playlist = await self._parse_playlist_from_search(playlist_data)
+            if playlist:
+                yield playlist
+
+    async def _popular_playlists(self) -> AsyncGenerator[Playlist, None]:
+        """Yield the public hot playlists (the anonymous-session behaviour)."""
         _LOGGER.debug("get_library_playlists called - returning popular playlists as library")
-
-        # For streaming provider, return popular playlists as library
-        # Use /top/playlist API to get the top/hot playlists
-        _LOGGER.debug("Requesting top playlists from API: /top/playlist with limit=50")
-        data = await self._request("/top/playlist/highquality", params={"limit": 50, "offset": 0, "cat": "全部"})
-
+        data = await self._request(
+            "/top/playlist/highquality", params={"limit": 50, "offset": 0, "cat": "全部"}
+        )
         if not data or "playlists" not in data:
             _LOGGER.warning("No playlists data returned from /top/playlist API")
             return
-
         playlists_list = data["playlists"]
         _LOGGER.debug(f"Received {len(playlists_list)} playlists from API")
-
-        count = 0
         for playlist_data in playlists_list:
-            playlist_name = playlist_data.get("name", "Unknown Playlist")
-            playlist_id = str(playlist_data.get("id", ""))
-
-            _LOGGER.debug(f"Processing playlist: {playlist_name} (ID: {playlist_id})")
-
-            # Parse playlist
             playlist = await self._parse_playlist_from_search(playlist_data)
             if playlist:
-                count += 1
-                _LOGGER.debug(f"Successfully yielded playlist {count}: {playlist.name}")
                 yield playlist
-            else:
-                _LOGGER.warning(f"Failed to parse playlist: {playlist_name}")
 
-        _LOGGER.debug(f"Total yielded {count} playlists from get_library_playlists")
+    async def _chart_playlists(self) -> AsyncGenerator[Playlist, None]:
+        """Yield the configured Netease charts (飙升榜/新歌榜/热歌榜...) as playlists."""
+        if not self._charts:
+            return
+        data = await self._request("/toplist")
+        charts = _payload_list(data, "list")
+        by_name = {
+            str(item.get("name")): item for item in charts if isinstance(item.get("name"), str)
+        }
+        resolved: list[dict[str, Any]] = []
+        for name in self._charts:
+            item = by_name.get(name)
+            if item is None:
+                # tolerate a partial name ("ACG" for 网易云ACG动画榜) as long as it is unambiguous
+                candidates = [value for key, value in by_name.items() if name in key]
+                item = candidates[0] if len(candidates) == 1 else None
+            if item is None:
+                _LOGGER.warning(
+                    "Netease chart %r not found - use a name from /discover/toplist "
+                    "(available: %s)",
+                    name,
+                    ", ".join(list(by_name)[:10]),
+                )
+                continue
+            resolved.append(item)
+        _LOGGER.info(
+            "Netease library charts: %d chart playlist(s): %s",
+            len(resolved),
+            ", ".join(str(item.get("name")) for item in resolved),
+        )
+        for item in resolved:
+            playlist = await self._parse_playlist_from_search(item)
+            if playlist:
+                yield playlist
 
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
         """Get full playlist details by id."""
