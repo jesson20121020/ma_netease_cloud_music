@@ -179,6 +179,15 @@ curl http://localhost:3000/login/status
 - 保持「扫码登录（推荐）」勾选 → 下一步显示二维码 → 手机**网易云音乐 App → 扫一扫** → 在手机上确认
 - 确认后向导自动完成并把 cookie 存到该实例；日志里出现 `login cookie: yes` 即表示已登录
 
+**扫码被网易云封禁：`8821 请切换其他登录方式或升级新版本再试`（2026-11-14 确认）**
+- 表现在手机能扫到（服务端返回 `802 授权中`），但 1～2 秒后网易云就把这次登录否掉（`8821`），手机上表现为一直转圈
+- 两条通道都被堵：后端 `/login/qr/*`（type=3）→「检测到当前设备环境异常」；直连官方网页通道（type=1）→ 8821。说明网易云按「非官方客户端」一刀切，与本地配置无关
+- Provider 已把「扫码登录」默认改为不勾选，并在被拒时把网易云原文报出来（不再无限转圈）
+- 可行替代（按推荐顺序）：
+  1. **登录 Cookie**：`curl -X POST "http://<API地址>/login/cellphone?phone=手机号&password=密码"` 取返回的 `cookie` 字段，填进向导的「登录 Cookie」
+  2. **短信验证码**：`curl "http://<API地址>/captcha/sent?phone=手机号&ctcode=86"` 收短信，再 `curl "http://<API地址>/login/cellphone?phone=手机号&captcha=验证码"`，取 `cookie`
+  3. 浏览器登录 `music.163.com` 后从其 Cookie 里复制 `MUSIC_U`（连同 `__csrf`）拼成 `MUSIC_U=...; __csrf=...` 填进去
+
 **如果手机提示「检测到当前设备环境异常，本次操作已拦截」**
 - 这是网易云的风控拦截，不是配置错误。原因：NeteaseCloudMusicApi 的 `/login/qr/*` 把二维码固定用 `type=3`（第三方客户端扫码通道）创建，风控更严
 - 官方网页登录用的是 `type=1`；本 Provider 已经改走这条通道（直接和 music.163.com 对话，见下），后端只负责把 key 编码成二维码图片

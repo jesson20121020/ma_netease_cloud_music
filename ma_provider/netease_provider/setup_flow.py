@@ -148,14 +148,15 @@ async def run_setup(session: SetupSession) -> None:
                 ConfigEntry(
                     key=CONF_KEY_QR_LOGIN,
                     type=ConfigEntryType.BOOLEAN,
-                    label="扫码登录（推荐）",
+                    label="扫码登录（网易云已限制，成功率低）",
                     description=(
-                        "下一步会显示二维码，用网易云音乐 App 扫码确认即可登录。登录后接口配额大"
-                        "幅提高，不再频繁「操作频繁」405，也能访问自己账号的歌单。取消勾选则使用"
-                        "匿名会话（配额较低）"
+                        "勾选后下一步显示二维码。注意：网易云近期对非官方客户端的扫码登录返回 "
+                        "8821「请切换其他登录方式或升级新版本再试」，手机扫完会被直接拒绝，"
+                        "所以默认不勾选；更可靠的方式是填下面的「登录 Cookie」（手机号/验证码登录"
+                        "后取 cookie）"
                     ),
                     default_value=False,
-                    value=True,
+                    value=False,
                     required=False,
                 ),
                 ConfigEntry(

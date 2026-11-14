@@ -227,7 +227,25 @@ ma-netease-provider/
 5. **日志出现 `Netease API rate limit reached (...): pausing requests for Ns`**
    - Provider 正在自动退避，通常无需干预；反复出现说明当前是**匿名会话**（配额很低）
 
-6. **登录以提升配额（推荐：扫码登录）**
+6. **登录以提升配额**
+
+   > ⚠️ 2026-11-14 实测：网易云已封禁服务端扫码登录。手机能扫到（服务端 `802`），但 1～2 秒后
+   > 返回 `8821 请切换其他登录方式或升级新版本再试`，手机端一直转圈。type=3（后端 `/login/qr/*`）
+   > 报「设备环境异常」，type=1（官方网页通道）报 8821，两条都不通。因此向导里的「扫码登录」默认关闭。
+
+   **推荐：手机号+密码换 cookie**（最快）
+   ```bash
+   curl -X POST "http://localhost:3000/login/cellphone?phone=手机号&password=密码"
+   # 取返回 JSON 的 cookie 字段，填进向导的「登录 Cookie」
+   ```
+
+   **或短信验证码**
+   ```bash
+   curl "http://localhost:3000/captcha/sent?phone=手机号&ctcode=86"      # 收短信验证码
+   curl "http://localhost:3000/login/cellphone?phone=手机号&captcha=验证码"
+   ```
+
+   历史上扫码流程（保留供参考，当前基本不可用）
    - MusicAssistant 后台 → 设置 → 提供商 → **Netease Cloud provider** → 「重新配置」
    - 保持「扫码登录（推荐）」勾选 → 下一步显示二维码 → 手机网易云音乐 App 扫一扫 → 手机上确认
    - 确认后向导自动完成并把 cookie 写入该实例；日志出现 `login cookie: yes` 即已登录
