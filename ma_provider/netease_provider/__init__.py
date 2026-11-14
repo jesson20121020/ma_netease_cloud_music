@@ -131,6 +131,17 @@ def _clean_cookie(raw: str) -> str:
     return "; ".join(f"{name}={value}" for name, value in seen.items())
 
 
+def _payload_list(payload: Any, *keys: str) -> list[dict[str, Any]]:
+    """Return the first list found under the given keys of an API payload."""
+    if not isinstance(payload, dict):
+        return []
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
 def _minimal_cookie(raw: str) -> str:
     """
     Return the smallest cookie Music Assistant needs: MUSIC_U plus (optionally) __csrf.
@@ -209,6 +220,7 @@ class NeteaseProvider(MusicProvider):
     _http_client: httpx.AsyncClient
     _rate_limited_until: float
     _rate_limit_strikes: int
+    _uid: str | None
     _last_request_at: float
     _request_lock: asyncio.Lock
 
@@ -278,6 +290,8 @@ class NeteaseProvider(MusicProvider):
                 ", ".join(part.split("=", 1)[0] for part in cookie.split("; ") if part),
             )
         self._cookie = cookie or None
+        # Netease uid of the logged-in account (None while anonymous); library methods use it
+        self._uid = None
 
         # Keep a private httpx client: this provider's request helpers are written against
         # httpx, while Music Assistant's shared session is an aiohttp ClientSession (there
@@ -333,6 +347,7 @@ class NeteaseProvider(MusicProvider):
             return
         label, cookie, identity = chosen
         self._cookie = cookie
+        self._uid = str(identity.get("uid")) if identity.get("uid") else None
         # prove the cookie also reaches Netease through the backend, i.e. that ordinary
         # requests (search/library) are the logged-in ones and not the anonymous guest
         backend_sees_login = await self._backend_sees_login(identity.get("uid"))
@@ -737,15 +752,23 @@ class NeteaseProvider(MusicProvider):
         try:
             song_id = str(song_data["id"])
             name = song_data.get("name", "Unknown")
-            duration = song_data.get("dt", 0) // 1000  # Convert from milliseconds
+            # /cloudsearch spells fields "dt/artists/album", /song|/playlist|/likelist detail
+            # spells them "dt/ar/al"; accept both so library syncs do not lose the artists
+            duration = (song_data.get("dt") or song_data.get("duration") or 0) // 1000
 
             # Parse artists - prefer detail_data if available (has more complete info)
             artists = UniqueList[Artist]()
-            artist_source = detail_data if detail_data else song_data
-            artist_key = "ar" if detail_data else "artists"
+            artist_list: list[dict[str, Any]] = []
+            for source in (detail_data, song_data):
+                if not isinstance(source, dict):
+                    continue
+                candidate = source.get("ar") or source.get("artists")
+                if isinstance(candidate, list) and candidate:
+                    artist_list = candidate
+                    break
 
-            if artist_key in artist_source:
-                for artist_data in artist_source[artist_key]:
+            if artist_list:
+                for artist_data in artist_list:
                     artist_id = str(artist_data["id"])
                     artist_name = artist_data.get("name", "Unknown Artist")
                     # Create artist with proper provider mapping and basic metadata
@@ -771,11 +794,16 @@ class NeteaseProvider(MusicProvider):
             # Parse album - prefer detail_data if available (has more complete info)
             album: Album | ItemMapping | None = None
             album_cover_url: str | None = None
-            album_source = detail_data if detail_data else song_data
-            album_key = "al" if detail_data else "album"
+            album_data = None
+            for source in (detail_data, song_data):
+                if not isinstance(source, dict):
+                    continue
+                candidate = source.get("al") or source.get("album")
+                if isinstance(candidate, dict) and candidate:
+                    album_data = candidate
+                    break
 
-            if album_key in album_source:
-                album_data = album_source[album_key]
+            if album_data:
                 album_id = str(album_data["id"])
                 album_name = album_data.get("name", "Unknown Album")
                 album_cover_url = album_data.get("picUrl")
@@ -1327,6 +1355,16 @@ class NeteaseProvider(MusicProvider):
     # Library methods - return empty for now as this is a streaming provider
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         """Retrieve library artists from the provider."""
+        if self._uid:
+            # logged in: the artists the account follows
+            data = await self._request("/artist/sublist", params={"limit": 200, "offset": 0})
+            artists_list = _payload_list(data, "data", "artists")
+            _LOGGER.info("Netease library artists: %d followed artist(s)", len(artists_list))
+            for artist_data in artists_list:
+                artist = await self._parse_artist_from_search(artist_data)
+                if artist:
+                    yield artist
+            return
         _LOGGER.debug("get_library_artists called - returning popular/hot artists as library")
 
         # For streaming provider, return popular/hot artists as library
@@ -1363,6 +1401,19 @@ class NeteaseProvider(MusicProvider):
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Retrieve library albums from the provider."""
+        if self._uid:
+            # logged in: the albums the account collected
+            data = await self._request("/album/sublist", params={"limit": 200, "offset": 0})
+            albums_list = _payload_list(data, "data", "albums")
+            _LOGGER.info("Netease library albums: %d saved album(s)", len(albums_list))
+            for album_data in albums_list:
+                # the sublist spells the artists as a list, the search payload as "artist"
+                if isinstance(album_data.get("artists"), list) and album_data["artists"]:
+                    album_data = {**album_data, "artist": album_data["artists"][0]}
+                album = await self._parse_album_from_search(album_data)
+                if album:
+                    yield album
+            return
         _LOGGER.debug("get_library_albums called - returning newest albums as library")
 
         # Use /album/newest API to get the latest albums
@@ -1396,6 +1447,20 @@ class NeteaseProvider(MusicProvider):
 
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
         """Retrieve library tracks from the provider."""
+        if self._uid:
+            # logged in: the account's liked songs ("我喜欢的音乐")
+            data = await self._request("/likelist", params={"uid": self._uid})
+            raw_ids = data.get("ids") if isinstance(data, dict) else None
+            ids = [str(song_id) for song_id in (raw_ids or [])]
+            _LOGGER.info("Netease library tracks: %d liked song(s)", len(ids))
+            for start in range(0, len(ids), 200):
+                chunk = ids[start : start + 200]
+                detail = await self._request("/song/detail", params={"ids": ",".join(chunk)})
+                for song_data in _payload_list(detail, "songs"):
+                    track = await self._parse_track_from_search(song_data)
+                    if track:
+                        yield track
+            return
         _LOGGER.debug("get_library_tracks called - returning popular tracks as library")
 
         # For streaming provider, return popular tracks as library
@@ -1445,6 +1510,22 @@ class NeteaseProvider(MusicProvider):
 
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
         """Retrieve library/subscribed playlists from the provider."""
+        if self._uid:
+            # logged in: the account's own + subscribed playlists (including 我喜欢的音乐)
+            data = await self._request(
+                "/user/playlist", params={"uid": self._uid, "limit": 1000, "offset": 0}
+            )
+            playlists_list = _payload_list(data, "playlist")
+            _LOGGER.info(
+                "Netease library playlists: %d playlist(s) of account %s",
+                len(playlists_list),
+                self._uid,
+            )
+            for playlist_data in playlists_list:
+                playlist = await self._parse_playlist_from_search(playlist_data)
+                if playlist:
+                    yield playlist
+            return
         _LOGGER.debug("get_library_playlists called - returning popular playlists as library")
 
         # For streaming provider, return popular playlists as library

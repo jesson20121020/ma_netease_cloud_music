@@ -123,6 +123,28 @@ docker run -d \
 - **登录 Cookie（备用）**: 已拿到 cookie 时可直接粘贴（匿名会话配额很低）
   - 获取: `curl -X POST 'http://localhost:3000/login/cellphone?phone=手机号&password=密码'`，取返回 JSON 的 `cookie` 字段
 
+### 📚 媒体库同步（登录后走账号数据）
+
+登录（配置了 cookie）后，`ma_provider` 的库同步改用账号自己的数据，而不是热门榜单：
+
+| 媒体类型 | 登录后数据源 | 匿名时（旧行为） |
+|---|---|---|
+| 歌单 | `/user/playlist` 账号自己创建 + 收藏的歌单（含「我喜欢的音乐」、年度歌单） | `/top/playlist/highquality` 热门歌单 |
+| 曲目 | `/likelist` 我喜欢的音乐 | 热门歌单里抽若干首 |
+| 歌手 | `/artist/sublist` 关注的歌手 | `/top/artists` 热门歌手 |
+| 专辑 | `/album/sublist` 收藏的专辑 | `/album/newest` 最新专辑 |
+
+同步时日志会打印数量，例如：
+
+```
+Netease library artists: 10 followed artist(s)
+Netease library playlists: 22 playlist(s) of account 249697856
+Netease library tracks: 420 liked song(s)
+```
+
+注意：`/song/detail`、`/playlist/detail`、`/likelist` 返回的字段是 `ar`/`al`，而 `/cloudsearch`
+返回的是 `artists`/`album`，解析器两种都认（否则同步会报 `Track is missing artist(s)` 而整条丢弃）。
+
 ## 🔌 技术规格
 
 ### API 接口使用
