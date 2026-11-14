@@ -95,9 +95,10 @@ docker run -d \
 在 MusicAssistant 的「设置 → 提供商 → 添加提供商」中选择 **Netease Cloud provider**，添加向导会要求填写：
 - **API 地址**（必填）: `http://localhost:3000`
 - **解锁 API 地址**（可选）: `http://localhost:3001`
-- **登录 Cookie**（可选，推荐）: 登录网易云后的 cookie，可大幅提高接口配额（避免「操作频繁」405）并访问自己账号的歌单
+- **扫码登录（推荐，默认勾选）**: 勾选后下一步直接显示二维码，用**网易云音乐 App → 扫一扫**扫描并在手机上确认即可登录，cookie 自动保存；二维码 120 秒过期会自动换新的
+- **登录 Cookie**（可选，仅在不方便扫码时手填）: 登录网易云后的 cookie，可大幅提高接口配额（避免「操作频繁」405）并访问自己账号的歌单
 
-向导会立即探测地址是否为可用的 NeteaseCloudMusicApi 服务，填错会提示重新输入；之后修改地址请使用提供商的「重新配置」。
+向导会立即探测地址是否为可用的 NeteaseCloudMusicApi 服务，填错会提示重新输入；之后修改地址或重新登录请使用提供商的「重新配置」（同样会出二维码）。不勾选扫码、也不填 cookie 时使用匿名会话（配额较低）。
 
 ## ✨ 功能特性
 
@@ -173,15 +174,30 @@ curl http://localhost:3000/login/status
   - 限流日志一轮只报一次 WARNING，其余降到 DEBUG；逐曲 INFO 日志改为 DEBUG
 - 注意：这不是根治。根治仍然是**登录后填 cookie**（见下一条），匿名会话配额低，刷新大媒体库时依然会被限流，只是不再「粘住」。
 
-**频繁限流（操作频繁）—— 登录后填入 cookie**
+**频繁限流（操作频繁）—— 扫码登录（推荐）**
+- MusicAssistant 后台 → 设置 → 提供商 → **Netease Cloud provider** → 「重新配置」
+- 保持「扫码登录（推荐）」勾选 → 下一步显示二维码 → 手机**网易云音乐 App → 扫一扫** → 在手机上确认
+- 确认后向导自动完成并把 cookie 存到该实例；日志里出现 `login cookie: yes` 即表示已登录
+
+底层就是这个接口（也可用命令行扮演同一个流程）：
+```bash
+# 1) 取二维码 key
+curl "http://192.168.31.1:3001/login/qr/key"
+# 2) 用返回的 unikey 生成二维码（qrimg 是可直接显示的 data:image/png;base64）
+curl "http://192.168.31.1:3001/login/qr/create?key=<unikey>&qrimg=true"
+# 3) 轮询结果：801 等待扫码 / 802 已扫码待确认 / 803 成功（返回 cookie）/ 800 已过期
+curl "http://192.168.31.1:3001/login/qr/check?key=<unikey>"
+```
+
+**备用：手机号+密码换 cookie**
 ```bash
 # 1) 手机号+密码登录，返回 JSON 里带一个很长的 cookie 字段
 curl -X POST "http://192.168.31.1:3001/login/cellphone?phone=手机号&password=密码"
-# 2) 把返回 JSON 里的 cookie 值填到 Provider 的「登录 Cookie（可选，推荐）」里（重新配置流程）
+# 2) 把返回 JSON 里的 cookie 值填到 Provider 的「登录 Cookie（可选）」里（重新配置流程）
 # 3) 验证：data.account 存在且 anonimousUser 不为 true 即表示已登录
 curl "http://192.168.31.1:3001/login/status?cookie=粘贴的cookie"
 ```
-登录后可显著提高接口配额（避免 405 操作频繁），并能访问自己账号的歌单；留空则使用匿名会话，配额较低。
+登录后可显著提高接口配额（避免 405 操作频繁），并能访问自己账号的歌单；不留 cookie 则使用匿名会话，配额较低。
 
 ## 📚 相关链接
 

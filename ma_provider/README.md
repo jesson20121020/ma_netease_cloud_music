@@ -91,9 +91,10 @@ docker run -d \
 
 - **API 地址**（必填）: `http://localhost:3000`
 - **解锁 API 地址**（可选）: `http://localhost:3001`
-- **登录 Cookie**（可选，推荐）: 登录后的 cookie（提高配额、避免 405 限流、可访问账号歌单），留空则用匿名会话
+- **扫码登录（推荐，默认勾选）**: 下一步直接显示二维码，用网易云音乐 App 扫码并在手机上确认即可登录，cookie 自动保存（提高配额、避免 405 限流、可访问账号歌单）；二维码 120 秒过期会自动换新的
+- **登录 Cookie**（可选，仅在不方便扫码时手填）: 登录后的 cookie，留空则由扫码登录或匿名会话处理
 
-向导会立即探测该地址是否为可用的 NeteaseCloudMusicApi 服务，地址填错时会提示重新填写。添加完成后如需修改地址，在提供商页面使用「重新配置」即可。
+向导会立即探测该地址是否为可用的 NeteaseCloudMusicApi 服务，地址填错时会提示重新填写。添加完成后如需修改地址或重新登录，在提供商页面使用「重新配置」即可（同样会出二维码）。不勾选扫码、也不填 cookie 时使用匿名会话（配额较低）。
 
 ## 📖 使用指南
 
@@ -116,9 +117,11 @@ docker run -d \
 - **解锁 API 地址**: 无版权限制音源服务
   - 启用后可获得更高质量的音源
   - 地址示例: `http://localhost:3001`
-- **登录 Cookie**: 登录网易云后的 cookie（匿名会话配额很低，容易被限流返回 405「操作频繁」）
+- **登录（扫码，推荐）**: 配置向导里勾选「扫码登录」，用**网易云音乐 App → 扫一扫**扫描向导显示的二维码并确认
+  - 走的是 NeteaseCloudMusicApi 的 `/login/qr/key` → `/login/qr/create` → `/login/qr/check`（801 等待扫码 / 802 待确认 / 803 成功 / 800 过期自动换码）
+  - 登录后接口配额显著提高（匿名会话配额很低，容易被限流返回 405「操作频繁」），并可访问自己账号的歌单
+- **登录 Cookie（备用）**: 已拿到 cookie 时可直接粘贴（匿名会话配额很低）
   - 获取: `curl -X POST 'http://localhost:3000/login/cellphone?phone=手机号&password=密码'`，取返回 JSON 的 `cookie` 字段
-  - 登录后接口配额显著提高，并可访问自己账号的歌单
 
 ## 🔌 技术规格
 
@@ -224,15 +227,17 @@ ma-netease-provider/
 5. **日志出现 `Netease API rate limit reached (...): pausing requests for Ns`**
    - Provider 正在自动退避，通常无需干预；反复出现说明当前是**匿名会话**（配额很低）
 
-6. **登录以提升配额（推荐）**
+6. **登录以提升配额（推荐：扫码登录）**
+   - MusicAssistant 后台 → 设置 → 提供商 → **Netease Cloud provider** → 「重新配置」
+   - 保持「扫码登录（推荐）」勾选 → 下一步显示二维码 → 手机网易云音乐 App 扫一扫 → 手机上确认
+   - 确认后向导自动完成并把 cookie 写入该实例；日志出现 `login cookie: yes` 即已登录
    ```bash
-   # 1) 手机号+密码登录，返回 JSON 里的 cookie 字段就是要填的值
-   curl -X POST "http://localhost:3000/login/cellphone?phone=手机号&password=密码"
-   # 2) 在 Provider 的重新配置流程里填入「登录 Cookie（可选，推荐）」，保存后重启
-   # 3) 验证：account 存在且 anonimousUser 不为 true 表示已登录
-   curl "http://localhost:3000/login/status?cookie=粘贴的cookie"
+   # 命令行等价流程
+   curl "http://localhost:3000/login/qr/key"                      # 取 unikey
+   curl "http://localhost:3000/login/qr/create?key=<unikey>&qrimg=true"   # qrimg 可直接显示
+   curl "http://localhost:3000/login/qr/check?key=<unikey>"       # 803 成功后返回 cookie
    ```
-   登录后可显著提高接口配额（避免 405 操作频繁），并能访问自己账号的歌单。
+   备用（不方便扫码时）：`curl -X POST "http://localhost:3000/login/cellphone?phone=手机号&password=密码"` 取 cookie 填到「登录 Cookie」，再用 `curl "http://localhost:3000/login/status?cookie=粘贴的cookie"` 验证 `anonimousUser` 不为 `true`。
 
 7. **日志出现 `'coroutine' object has no attribute 'get'`**
    - 说明 Provider 把 MusicAssistant 共享的 aiohttp 会话当作 httpx 使用（`MassClientResponse.json` 是协程）；更新到最新代码即可（Provider 使用自己的 `httpx.AsyncClient`）
