@@ -108,6 +108,46 @@ SUPPORTED_FEATURES = {
 }
 
 
+# Set-Cookie attributes that may be pasted together with the cookie value (the API's
+# /login/* responses return "MUSIC_U=...; Max-Age=...; Expires=...; Path=/; __csrf=...").
+# They are not part of the cookie the NeteaseCloudMusicApi expects as a request parameter.
+_COOKIE_ATTRIBUTES = {"expires", "max-age", "path", "domain", "secure", "httponly", "samesite"}
+
+
+def _clean_cookie(raw: str) -> str:
+    """Drop Set-Cookie attributes and duplicate names from a pasted cookie string."""
+    seen: dict[str, str] = {}
+    for item in raw.replace(";;", ";").split(";"):
+        name, sep, value = item.strip().partition("=")
+        name = name.strip()
+        if not sep or not name or name.lower() in _COOKIE_ATTRIBUTES:
+            continue
+        value = value.strip()
+        if not value:
+            # an empty MUSIC_U (logged-out browser, or a truncated copy) makes Netease treat
+            # the whole thing as an anonymous session
+            continue
+        seen[name] = value
+    return "; ".join(f"{name}={value}" for name, value in seen.items())
+
+
+def _minimal_cookie(raw: str) -> str:
+    """
+    Return the smallest cookie Music Assistant needs: MUSIC_U plus (optionally) __csrf.
+
+    Browsers hand out a whole pile of cookies, and the NeteaseCloudMusicApi forwards them
+    verbatim; a stale/conflicting guest cookie in that pile can make the backend keep the
+    anonymous session even though MUSIC_U is valid.
+    """
+    keep = {"MUSIC_U", "__csrf"}
+    parts = [
+        part
+        for part in _clean_cookie(raw).split("; ")
+        if part and part.partition("=")[0] in keep and part.partition("=")[2]
+    ]
+    return "; ".join(parts)
+
+
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
@@ -225,8 +265,19 @@ class NeteaseProvider(MusicProvider):
 
         # Optional login cookie: an authenticated Netease session has a much higher quota
         # than the anonymous one that NeteaseCloudMusicApi starts with.
-        cookie = self.get_setup_value(CONF_KEY_COOKIE)
-        self._cookie = cookie.strip() if isinstance(cookie, str) and cookie.strip() else None
+        raw_cookie = self.get_setup_value(CONF_KEY_COOKIE)
+        raw_cookie = raw_cookie.strip() if isinstance(raw_cookie, str) else ""
+        # a pasted cookie usually carries "Max-Age=/Expires=/Path=" tokens which make the
+        # backend treat the whole thing as a broken cookie (i.e. silently anonymous)
+        cookie = _clean_cookie(raw_cookie)
+        if raw_cookie and cookie != raw_cookie:
+            _LOGGER.info(
+                "Netease cookie normalised: %d chars -> %d chars, names=[%s]",
+                len(raw_cookie),
+                len(cookie),
+                ", ".join(part.split("=", 1)[0] for part in cookie.split("; ") if part),
+            )
+        self._cookie = cookie or None
 
         # Keep a private httpx client: this provider's request helpers are written against
         # httpx, while Music Assistant's shared session is an aiohttp ClientSession (there
@@ -242,6 +293,131 @@ class NeteaseProvider(MusicProvider):
             self._unblock_api_url,
             "yes" if self._cookie else "no (anonymous session, lower rate limit)",
         )
+        if self._cookie:
+            # a stored cookie that Netease no longer accepts keeps the provider on the tiny
+            # anonymous quota without any visible symptom, so say out loud who we are logged in as
+            await self._log_cookie_identity()
+
+    async def _log_cookie_identity(self) -> None:
+        """Verify the configured cookie with Netease and log who it belongs to."""
+        full_cookie = self._cookie or ""
+        minimal_cookie = _minimal_cookie(full_cookie)
+        candidates = [("full", full_cookie)]
+        if minimal_cookie and minimal_cookie != full_cookie:
+            candidates.append(("minimal", minimal_cookie))
+        try:
+            chosen: tuple[str, str, dict] | None = None
+            for label, cookie in candidates:
+                self._cookie = cookie
+                identity = await self._cookie_identity()
+                if identity is not None:
+                    chosen = (label, cookie, identity)
+                    break
+        except Exception as err:  # noqa: BLE001 - never fail provider setup because of the probe
+            _LOGGER.debug("Could not verify the Netease cookie: %s", err)
+            self._cookie = full_cookie
+            return
+        if chosen is None:
+            # neither variant authenticates: the cookie itself is dead
+            parts = [part for part in full_cookie.split("; ") if part]
+            _LOGGER.warning(
+                "Netease cookie is NOT logged in (Netease still answers with an anonymous "
+                "session) - the account quota stays at the tiny guest one and searches will be "
+                "throttled. Re-login in a browser and paste a fresh cookie. "
+                "cookie length=%d, MUSIC_U length=%d, names=[%s]",
+                len(full_cookie),
+                len(next((p.partition("=")[2] for p in parts if p.startswith("MUSIC_U=")), "")),
+                ", ".join(part.partition("=")[0] for part in parts),
+            )
+            self._cookie = full_cookie
+            return
+        label, cookie, identity = chosen
+        self._cookie = cookie
+        # prove the cookie also reaches Netease through the backend, i.e. that ordinary
+        # requests (search/library) are the logged-in ones and not the anonymous guest
+        backend_sees_login = await self._backend_sees_login(identity.get("uid"))
+        _LOGGER.info(
+            "Netease login verified: %s (uid %s, vipType %s, cookie=%s%s, backend=%s)",
+            identity.get("nickname") or "unknown",
+            identity.get("uid"),
+            identity.get("vipType"),
+            label,
+            "" if label == "full" else " (trimmed to MUSIC_U/__csrf)",
+            "logged-in" if backend_sees_login else "anonymous(!)",
+        )
+        if not backend_sees_login:
+            _LOGGER.warning(
+                "The cookie is valid at Netease but the backend does not apply it - "
+                "check that the NeteaseCloudMusicApi version is current, otherwise searches "
+                "still run on the tiny guest quota",
+            )
+
+    async def _backend_sees_login(self, uid: Any) -> bool:
+        """Return whether the backend itself answers as the logged-in account."""
+        if not uid:
+            return False
+        try:
+            data = await self._request("/user/playlist", params={"uid": str(uid), "limit": 1})
+        except Exception as err:  # noqa: BLE001 - diagnostic only
+            _LOGGER.debug("Backend login probe failed: %s", err)
+            return False
+        playlists = data.get("playlist") if isinstance(data, dict) else None
+        return isinstance(playlists, list) and bool(playlists)
+
+    async def _cookie_identity(self) -> dict[str, Any] | None:
+        """Return the logged-in account behind the current cookie, or None when anonymous."""
+        identity = self._identity_from_payload(await self._request("/login/status"))
+        if identity is not None:
+            return identity
+        # the backend may be the thing dropping the cookie (it rebuilds the cookie header),
+        # so ask Netease itself as a second opinion before declaring the cookie dead
+        return await self._cookie_identity_direct()
+
+    async def _cookie_identity_direct(self) -> dict[str, Any] | None:
+        """Ask Netease's own web API who the current cookie belongs to."""
+        if not self._cookie:
+            return None
+        url = "https://music.163.com/api/nuser/account/get"
+        headers = {
+            "Cookie": self._cookie,
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://music.163.com/",
+        }
+        try:
+            response = await self._http_client.post(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as err:  # noqa: BLE001 - diagnostic only
+            _LOGGER.debug("Direct Netease cookie probe failed: %s", err)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
+        profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
+        if not account or account.get("anonimousUser"):
+            return None
+        return {
+            "uid": account.get("id"),
+            "nickname": profile.get("nickname") or account.get("userName"),
+            "vipType": account.get("vipType"),
+        }
+
+    def _identity_from_payload(self, data: Any) -> dict[str, Any] | None:
+        """Extract the account identity from a /login/status style payload."""
+        payload = data.get("data") if isinstance(data, dict) else None
+        payload = payload if isinstance(payload, dict) else {}
+        account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
+        profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
+        if not account or account.get("anonimousUser"):
+            return None
+        return {
+            "uid": account.get("id"),
+            "nickname": profile.get("nickname") or account.get("userName"),
+            "vipType": account.get("vipType"),
+        }
 
     async def unload(self, is_removed: bool = False) -> None:
         """

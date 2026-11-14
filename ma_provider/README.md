@@ -227,6 +227,22 @@ ma-netease-provider/
 5. **日志出现 `Netease API rate limit reached (...): pausing requests for Ns`**
    - Provider 正在自动退避，通常无需干预；反复出现说明当前是**匿名会话**（配额很低）
 
+6. **验证 cookie 是否真的生效**（2026-11-14 新增）
+
+   启动日志里会打印一行身份核对，例如：
+
+   ```
+   Netease login verified: 小远和南方 (uid 249697856, vipType 11, cookie=full, backend=logged-in)
+   ```
+
+   - `cookie=full|minimal`：用的是完整 cookie 还是被裁剪成 `MUSIC_U+__csrf`（浏览器 cookie 里那些
+     访客 cookie 有时会让后端保持匿名，Provider 会自动降级重试）
+   - `backend=logged-in`：**这一项才是关键**——它验证「后端把 cookie 带上后，普通搜索走的是登录配额」
+   - 若出现 `Netease cookie is NOT logged in ...` 说明 cookie 已失效（会打印 MUSIC_U 长度，便于判断是不是
+     复制时被截断），重新登录后再贴一次
+   - 注意：单看后端 `/login/status` 会误报匿名（实测 cookie 有效时它仍回 anonimousUser），所以 Provider
+     会用 Netease 直连 + 一次 `/user/playlist` 交叉验证
+
 6. **登录以提升配额**
 
    > ⚠️ 2026-11-14 实测：网易云已封禁服务端扫码登录。手机能扫到（服务端 `802`），但 1～2 秒后
