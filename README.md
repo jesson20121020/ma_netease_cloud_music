@@ -160,6 +160,19 @@ curl http://localhost:3000/login/status
 - 若日志出现 `'coroutine' object has no attribute 'get'` 或 `RuntimeWarning: coroutine 'MassClientResponse.json' was never awaited`，说明 Provider 把 MusicAssistant 的 aiohttp 会话当成 httpx 使用，同样更新到最新代码即可
 - 若日志出现 `Netease API rate limit reached (...): pausing requests for Ns`：这是 Provider 正在自动退避，通常无需干预；频繁出现说明当前是**匿名会话**（配额很低），登录后填入 cookie 即可解决
 
+**搜索「不刷新」/ 某个关键词一直搜不到（已修复，2026-11-14）**
+- 现象：某个关键词搜一次没结果，之后再搜同一个词始终是空的；换个词才有结果；重启 Music Assistant 或等很久才恢复
+- 根因链（三层叠加）：
+  1. 匿名会话配额低，刷新媒体库时 `/cloudsearch` 会被网易回 `405 操作频繁`
+  2. 旧版 Provider 收到 405 后**在锁里睡满 15s→120s 的退避**，而 Music Assistant 只等 provider **8s**（`SEARCH_PROVIDER_SOFT_TIMEOUT`），于是这次搜索不带网易云结果
+  3. 旧版 Provider 把「全部类型都失败」**当成成功返回空结果**；Music Assistant 对 streaming provider 的搜索结果会缓存 **24 小时**，前端 `useProgressiveSearch` 还会把空结果按 provider 记在页面上。于是一个空结果被缓存住，同一个词怎么搜都是空
+- 现在的行为（本仓库最新代码）：
+  - 剩余退避时间 > 3s 时**立即**抛 `ResourceTemporarilyUnavailable`（不等满），Music Assistant 按「暂时不可用」处理并稍后重试，前端 7s 后自动重试（最多 3 次）
+  - 只有**真正拿到数据**才返回；四类搜索全失败时抛异常而不是返回空 → 不会再把空结果缓存 24 小时
+  - 单曲详情补图失败不再丢掉已搜到的单曲（降级返回）
+  - 限流日志一轮只报一次 WARNING，其余降到 DEBUG；逐曲 INFO 日志改为 DEBUG
+- 注意：这不是根治。根治仍然是**登录后填 cookie**（见下一条），匿名会话配额低，刷新大媒体库时依然会被限流，只是不再「粘住」。
+
 **频繁限流（操作频繁）—— 登录后填入 cookie**
 ```bash
 # 1) 手机号+密码登录，返回 JSON 里带一个很长的 cookie 字段

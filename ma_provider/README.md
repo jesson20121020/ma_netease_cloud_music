@@ -151,6 +151,23 @@ ma-netease-provider/
 
 ## 🔧 故障排查
 
+### 🔁 某个关键词一直搜不到 / 搜索「不刷新」（2026-11-14 已修复）
+
+现象：第一次搜某个词没结果，之后同一个词怎么搜都是空，换个词才有结果。
+
+三层原因：
+
+1. 匿名会话配额低，媒体库刷新时 `/cloudsearch` 被网易回 `405 操作频繁`；
+2. 旧代码收到 405 后在请求锁里**睡满 15s→120s 的退避**，而 Music Assistant 只等
+   provider **8 秒**（`SEARCH_PROVIDER_SOFT_TIMEOUT`），这次搜索就不带网易云结果；
+3. 旧代码把「所有类型都失败」当成成功、返回**空结果**，Music Assistant 会把这个空结果
+   按 streaming provider 缓存 **24 小时**，前端也会按 provider 记住空结果
+   （`useProgressiveSearch`）——于是同一个词被「粘住」。
+
+现在：剩余退避 > 3s 立即抛 `ResourceTemporarilyUnavailable`（不睡满）、只有拿到数据才返回
+（全失败抛异常 → 不会被缓存成空）、补图失败不再丢单曲。**根治仍建议填登录 cookie**提高配额。
+
+
 ### 🚫 Provider 初始化失败
 
 **可能原因及解决方案：**

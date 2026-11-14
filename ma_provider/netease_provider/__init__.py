@@ -72,6 +72,14 @@ RATE_LIMIT_RETRIES = 2
 REQUEST_MIN_INTERVAL = 0.35
 RATE_LIMIT_STATUS_CODES = (405, 429)
 
+# Music Assistant only waits SEARCH_PROVIDER_SOFT_TIMEOUT (8s) for a provider search and
+# then drops that provider from the answer; the frontend retries an empty provider answer
+# a couple of times and afterwards keeps it until the search term changes. Sitting out a
+# (15s..120s) rate-limit pause therefore turns a throttled search into "no results" for
+# that term, so never block longer than this: raise ResourceTemporarilyUnavailable instead
+# and let Music Assistant (and the frontend) retry later.
+MAX_WAIT_FOR_RATE_LIMIT = 3.0
+
 # NeteaseCloudMusicApi search types
 # 1: 单曲, 10: 专辑, 100: 歌手, 1000: 歌单, 1009: 电台, 1014: 视频
 NETEASE_SEARCH_TYPE_SONG = 1
@@ -326,14 +334,26 @@ class NeteaseProvider(MusicProvider):
             return data
 
     async def _wait_for_slot(self) -> None:
-        """Sleep until it is allowed to send the next request (rate limit + spacing)."""
+        """
+        Sleep until it is allowed to send the next request (rate limit + spacing).
+
+        A long remaining rate-limit pause is *not* slept through: that blocks a user search
+        far past Music Assistant's provider timeout and makes the caller answer with an
+        empty result, which then sticks. Raise ResourceTemporarilyUnavailable instead, so
+        Music Assistant treats it as a temporary provider problem (retried later, and never
+        cached as a valid empty answer).
+        """
         while True:
             now = time.monotonic()
             # honor an active rate limit pause, but never send two requests back to back
-            delay = max(
-                self._rate_limited_until - now,
-                REQUEST_MIN_INTERVAL - (now - self._last_request_at),
-            )
+            pause = self._rate_limited_until - now
+            if pause > MAX_WAIT_FOR_RATE_LIMIT:
+                msg = (
+                    "Netease API rate limit active, refusing to wait "
+                    f"{int(pause)}s for the next request slot"
+                )
+                raise ResourceTemporarilyUnavailable(msg, backoff_time=max(int(pause), 1))
+            delay = max(pause, REQUEST_MIN_INTERVAL - (now - self._last_request_at))
             if delay <= 0:
                 self._last_request_at = time.monotonic()
                 return
@@ -347,11 +367,10 @@ class NeteaseProvider(MusicProvider):
             RATE_LIMIT_BACKOFF_MAX,
         )
         self._rate_limited_until = time.monotonic() + backoff
-        _LOGGER.warning(
-            "Netease API rate limit reached (%s): pausing requests for %ds",
-            url,
-            int(backoff),
-        )
+        # one warning per throttle episode keeps the log readable during a library refresh,
+        # the repeated strikes of the same episode are only interesting when debugging
+        log = _LOGGER.warning if self._rate_limit_strikes == 1 else _LOGGER.debug
+        log("Netease API rate limit reached (%s): pausing requests for %ds", url, int(backoff))
 
     async def _request_unblock_api(self, song_id: str) -> dict[str, Any] | None:
         """Request unblock API to get alternative audio sources."""
@@ -365,7 +384,7 @@ class NeteaseProvider(MusicProvider):
             response.raise_for_status()
             data = response.json()
             if data.get("success") and data.get("audioUrl"):
-                _LOGGER.info("Successfully got unblocked URL for song %s from source: %s", song_id, data.get("source"))
+                _LOGGER.debug("Successfully got unblocked URL for song %s from source: %s", song_id, data.get("source"))
                 return data
             else:
                 _LOGGER.debug("Unblock API returned no valid result for song %s", song_id)
@@ -427,6 +446,11 @@ class NeteaseProvider(MusicProvider):
             media_types = [MediaType.TRACK, MediaType.ALBUM, MediaType.ARTIST]
 
         result = SearchResults()
+        # A throttled/temporarily failing backend must not be reported as "no results":
+        # Music Assistant would cache that empty answer (24h for a streaming provider) and
+        # the same search term would keep coming back empty. Track such failures and raise
+        # at the end when nothing at all could be returned.
+        transient_error: ResourceTemporarilyUnavailable | None = None
 
         # Search for tracks
         if MediaType.TRACK in media_types:
@@ -437,14 +461,23 @@ class NeteaseProvider(MusicProvider):
                 )
                 if data and "result" in data and "songs" in data["result"]:
                     songs_data = data["result"]["songs"][:limit]
-                    # Batch fetch track details for accurate cover images
-                    track_details = await self._batch_fetch_track_details([str(song["id"]) for song in songs_data])
+                    # Batch fetch track details for accurate cover images; the search
+                    # payload alone is good enough, so a failing details call must not
+                    # throw away the tracks we already have.
+                    try:
+                        track_details = await self._batch_fetch_track_details(
+                            [str(song["id"]) for song in songs_data]
+                        )
+                    except ResourceTemporarilyUnavailable:
+                        track_details = {}
                     for song_data in songs_data:
                         track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
                         if track:
                             result.tracks.append(track)
+            except ResourceTemporarilyUnavailable as err:
+                transient_error = err
             except Exception as err:
-                _LOGGER.error("Error searching tracks: %s", err)
+                _LOGGER.warning("Error searching tracks: %s", err)
 
         # Search for albums
         if MediaType.ALBUM in media_types:
@@ -458,8 +491,10 @@ class NeteaseProvider(MusicProvider):
                         album = await self._parse_album_from_search(album_data)
                         if album:
                             result.albums.append(album)
+            except ResourceTemporarilyUnavailable as err:
+                transient_error = err
             except Exception as err:
-                _LOGGER.error("Error searching albums: %s", err)
+                _LOGGER.warning("Error searching albums: %s", err)
 
         # Search for artists
         if MediaType.ARTIST in media_types:
@@ -473,8 +508,10 @@ class NeteaseProvider(MusicProvider):
                         artist = await self._parse_artist_from_search(artist_data)
                         if artist:
                             result.artists.append(artist)
+            except ResourceTemporarilyUnavailable as err:
+                transient_error = err
             except Exception as err:
-                _LOGGER.error("Error searching artists: %s", err)
+                _LOGGER.warning("Error searching artists: %s", err)
 
         # Search for playlists
         if MediaType.PLAYLIST in media_types:
@@ -488,12 +525,19 @@ class NeteaseProvider(MusicProvider):
                         playlist = await self._parse_playlist_from_search(playlist_data)
                         if playlist:
                             result.playlists.append(playlist)
+            except ResourceTemporarilyUnavailable as err:
+                transient_error = err
             except Exception as err:
-                _LOGGER.error("Error searching playlists: %s", err)
+                _LOGGER.warning("Error searching playlists: %s", err)
+
+        if transient_error is not None and not (
+            result.tracks or result.albums or result.artists or result.playlists
+        ):
+            # nothing came back *and* the backend was throttling: let Music Assistant see a
+            # temporary failure (retried later, not cached) instead of a valid empty answer
+            raise transient_error
 
         return result
-
-
 
     async def _batch_fetch_track_details(self, track_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Batch fetch track details for accurate cover images."""
@@ -930,7 +974,7 @@ class NeteaseProvider(MusicProvider):
             if self._unblock_api_url:
                 unblock_data = await self._request_unblock_api(item_id)
                 if unblock_data and unblock_data.get("audioUrl"):
-                    _LOGGER.info("Using unblocked URL for track %s from source: %s", item_id, unblock_data.get("source"))
+                    _LOGGER.debug("Using unblocked URL for track %s from source: %s", item_id, unblock_data.get("source"))
                     return StreamDetails(
                         provider=self.instance_id,
                         item_id=item_id,
@@ -1033,7 +1077,7 @@ class NeteaseProvider(MusicProvider):
 
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
         """Get top tracks for the given artist."""
-        _LOGGER.info(f"get_artist_toptracks called for artist ID: {prov_artist_id}")
+        _LOGGER.debug(f"get_artist_toptracks called for artist ID: {prov_artist_id}")
 
         # Use /artist/top/song API to get top songs for an artist
         data = await self._request("/artist/top/song", params={"id": prov_artist_id})
@@ -1042,13 +1086,13 @@ class NeteaseProvider(MusicProvider):
             return []
 
         songs = data["songs"]
-        _LOGGER.info(f"Found {len(songs)} top songs for artist {prov_artist_id}")
+        _LOGGER.debug(f"Found {len(songs)} top songs for artist {prov_artist_id}")
 
         tracks = []
 
         # Batch fetch track details for accurate cover images
         track_ids = [str(song["id"]) for song in songs]
-        _LOGGER.info(f"Batch fetching details for {len(track_ids)} tracks")
+        _LOGGER.debug(f"Batch fetching details for {len(track_ids)} tracks")
         track_details = await self._batch_fetch_track_details(track_ids)
 
         for idx, song_data in enumerate(songs):
@@ -1056,19 +1100,19 @@ class NeteaseProvider(MusicProvider):
             track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
             if track:
                 tracks.append(track)
-                _LOGGER.info(f"Successfully added top track: {track.name}")
+                _LOGGER.debug(f"Successfully added top track: {track.name}")
             else:
                 _LOGGER.warning(f"Failed to create track for top song: {song_data.get('name', 'Unknown')}")
 
-        _LOGGER.info(f"Returning {len(tracks)} top tracks for artist {prov_artist_id}")
+        _LOGGER.debug(f"Returning {len(tracks)} top tracks for artist {prov_artist_id}")
         return tracks
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get all tracks for a given album."""
-        _LOGGER.info(f"get_album_tracks called for album ID: {prov_album_id}")
+        _LOGGER.debug(f"get_album_tracks called for album ID: {prov_album_id}")
 
         data = await self._request("/album", params={"id": prov_album_id})
-        _LOGGER.info(f"Album API response: {data}")
+        _LOGGER.debug(f"Album API response: {data}")
 
         if not data:
             _LOGGER.warning(f"No data returned from album API for ID: {prov_album_id}")
@@ -1079,7 +1123,7 @@ class NeteaseProvider(MusicProvider):
             return []
 
         songs = data.get("songs", [])
-        _LOGGER.info(f"Found {len(songs)} songs in album response")
+        _LOGGER.debug(f"Found {len(songs)} songs in album response")
 
         if not songs:
             _LOGGER.warning(f"No songs found in album {prov_album_id}")
@@ -1089,28 +1133,28 @@ class NeteaseProvider(MusicProvider):
 
         # Batch fetch track details for accurate cover images
         track_ids = [str(song["id"]) for song in songs]
-        _LOGGER.info(f"Batch fetching details for {len(track_ids)} tracks")
+        _LOGGER.debug(f"Batch fetching details for {len(track_ids)} tracks")
         track_details = await self._batch_fetch_track_details(track_ids)
 
         for song_data in songs:
-            _LOGGER.info(f"Processing song: {song_data.get('name', 'Unknown')}")
+            _LOGGER.debug(f"Processing song: {song_data.get('name', 'Unknown')}")
             track = await self._parse_track_from_search(song_data, track_details.get(str(song_data["id"])))
             if track:
                 tracks.append(track)
-                _LOGGER.info(f"Successfully created track: {track.name}")
+                _LOGGER.debug(f"Successfully created track: {track.name}")
             else:
                 _LOGGER.warning(f"Failed to create track for song: {song_data.get('name', 'Unknown')}")
 
-        _LOGGER.info(f"Returning {len(tracks)} tracks for album {prov_album_id}")
+        _LOGGER.debug(f"Returning {len(tracks)} tracks for album {prov_album_id}")
         return tracks
 
     # Library methods - return empty for now as this is a streaming provider
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         """Retrieve library artists from the provider."""
-        _LOGGER.info("get_library_artists called - returning popular/hot artists as library")
+        _LOGGER.debug("get_library_artists called - returning popular/hot artists as library")
 
         # For streaming provider, return popular/hot artists as library
-        _LOGGER.info("Requesting top artists from API: /top/artists with limit=50")
+        _LOGGER.debug("Requesting top artists from API: /top/artists with limit=50")
         data = await self._request("/top/artists", params={"limit": 50, "offset": 0})
 
         if not data:
@@ -1122,7 +1166,7 @@ class NeteaseProvider(MusicProvider):
             return
 
         artists_list = data["artists"]
-        _LOGGER.info(f"Received {len(artists_list)} artists from API")
+        _LOGGER.debug(f"Received {len(artists_list)} artists from API")
 
         count = 0
         for artist_data in artists_list:
@@ -1139,14 +1183,14 @@ class NeteaseProvider(MusicProvider):
             else:
                 _LOGGER.warning(f"Failed to parse artist: {artist_name}")
 
-        _LOGGER.info(f"Total yielded {count} artists from get_library_artists")
+        _LOGGER.debug(f"Total yielded {count} artists from get_library_artists")
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Retrieve library albums from the provider."""
-        _LOGGER.info("get_library_albums called - returning newest albums as library")
+        _LOGGER.debug("get_library_albums called - returning newest albums as library")
 
         # Use /album/newest API to get the latest albums
-        _LOGGER.info("Requesting newest albums from API: /album/newest")
+        _LOGGER.debug("Requesting newest albums from API: /album/newest")
         data = await self._request("/album/newest", params={})
 
         if not data or "albums" not in data:
@@ -1154,7 +1198,7 @@ class NeteaseProvider(MusicProvider):
             return
 
         albums_list = data["albums"]
-        _LOGGER.info(f"Received {len(albums_list)} newest albums from API")
+        _LOGGER.debug(f"Received {len(albums_list)} newest albums from API")
 
         count = 0
         for album_data in albums_list:
@@ -1172,15 +1216,15 @@ class NeteaseProvider(MusicProvider):
             else:
                 _LOGGER.warning(f"Failed to parse album: {album_name}")
 
-        _LOGGER.info(f"Total yielded {count} albums from get_library_albums")
+        _LOGGER.debug(f"Total yielded {count} albums from get_library_albums")
 
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
         """Retrieve library tracks from the provider."""
-        _LOGGER.info("get_library_tracks called - returning popular tracks as library")
+        _LOGGER.debug("get_library_tracks called - returning popular tracks as library")
 
         # For streaming provider, return popular tracks as library
         # We'll get tracks from top playlists
-        _LOGGER.info("Requesting top playlists from API to get popular tracks")
+        _LOGGER.debug("Requesting top playlists from API to get popular tracks")
         data = await self._request("/top/playlist", params={"limit": 10, "offset": 0, "cat": "全部"})
 
         if not data or "playlists" not in data:
@@ -1188,7 +1232,7 @@ class NeteaseProvider(MusicProvider):
             return
 
         playlists = data["playlists"][:3]  # Limit to 3 playlists
-        _LOGGER.info(f"Processing {len(playlists)} top playlists for tracks")
+        _LOGGER.debug(f"Processing {len(playlists)} top playlists for tracks")
 
         count = 0
         for playlist in playlists:
@@ -1218,18 +1262,18 @@ class NeteaseProvider(MusicProvider):
 
                     # Limit total tracks returned
                     if count >= 30:
-                        _LOGGER.info("Reached track limit (30), stopping")
+                        _LOGGER.debug("Reached track limit (30), stopping")
                         return
 
-        _LOGGER.info(f"Total yielded {count} tracks from get_library_tracks")
+        _LOGGER.debug(f"Total yielded {count} tracks from get_library_tracks")
 
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
         """Retrieve library/subscribed playlists from the provider."""
-        _LOGGER.info("get_library_playlists called - returning popular playlists as library")
+        _LOGGER.debug("get_library_playlists called - returning popular playlists as library")
 
         # For streaming provider, return popular playlists as library
         # Use /top/playlist API to get the top/hot playlists
-        _LOGGER.info("Requesting top playlists from API: /top/playlist with limit=50")
+        _LOGGER.debug("Requesting top playlists from API: /top/playlist with limit=50")
         data = await self._request("/top/playlist/highquality", params={"limit": 50, "offset": 0, "cat": "全部"})
 
         if not data or "playlists" not in data:
@@ -1237,7 +1281,7 @@ class NeteaseProvider(MusicProvider):
             return
 
         playlists_list = data["playlists"]
-        _LOGGER.info(f"Received {len(playlists_list)} playlists from API")
+        _LOGGER.debug(f"Received {len(playlists_list)} playlists from API")
 
         count = 0
         for playlist_data in playlists_list:
@@ -1255,7 +1299,7 @@ class NeteaseProvider(MusicProvider):
             else:
                 _LOGGER.warning(f"Failed to parse playlist: {playlist_name}")
 
-        _LOGGER.info(f"Total yielded {count} playlists from get_library_playlists")
+        _LOGGER.debug(f"Total yielded {count} playlists from get_library_playlists")
 
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
         """Get full playlist details by id."""
@@ -1309,7 +1353,7 @@ class NeteaseProvider(MusicProvider):
         else:
             songs = data["songs"]
 
-        _LOGGER.info(f"Found {len(songs)} songs in playlist {prov_playlist_id}")
+        _LOGGER.debug(f"Found {len(songs)} songs in playlist {prov_playlist_id}")
 
         # Apply pagination: page is 0-indexed, default page size is 50
         page_size = 50
@@ -1319,7 +1363,7 @@ class NeteaseProvider(MusicProvider):
 
         # Batch fetch track details for accurate cover images
         track_ids = [str(song["id"]) for song in paginated_songs]
-        _LOGGER.info(f"Batch fetching details for {len(track_ids)} tracks")
+        _LOGGER.debug(f"Batch fetching details for {len(track_ids)} tracks")
         track_details = await self._batch_fetch_track_details(track_ids)
 
         tracks = []
@@ -1371,7 +1415,7 @@ class NeteaseProvider(MusicProvider):
 
     async def get_lyrics(self, prov_track_id: str) -> str | None:
         """Get lyrics for a given track id."""
-        _LOGGER.info(f"get_lyrics called for track ID: {prov_track_id}")
+        _LOGGER.debug(f"get_lyrics called for track ID: {prov_track_id}")
 
         # Use the /lyric endpoint to get lyrics for the track
         data = await self._request("/lyric", params={"id": prov_track_id})
@@ -1390,7 +1434,7 @@ class NeteaseProvider(MusicProvider):
             _LOGGER.warning(f"Empty lyrics returned from API for track {prov_track_id}")
             return None
 
-        _LOGGER.info(f"Successfully retrieved lyrics for track {prov_track_id}")
+        _LOGGER.debug(f"Successfully retrieved lyrics for track {prov_track_id}")
         return lyrics_text
 
     async def get_popular_artists(self, limit: int = 50) -> AsyncGenerator[Artist, None]:
